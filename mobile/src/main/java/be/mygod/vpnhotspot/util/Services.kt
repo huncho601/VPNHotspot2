@@ -1,13 +1,15 @@
 package be.mygod.vpnhotspot.util
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkRequest
+import android.net.TetheringManager
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import androidx.annotation.RequiresApi
 import androidx.core.content.getSystemService
 import timber.log.Timber
 
@@ -29,8 +31,11 @@ object Services {
         }
     }
     val wifi by lazy { context.getSystemService<WifiManager>()!! }
+    @get:RequiresApi(30)
+    val tethering by lazy { context.getSystemService<TetheringManager>()!! }
 
-    fun registerNetworkCallbackCompat(request: NetworkRequest, networkCallback: ConnectivityManager.NetworkCallback) =
-        if (Build.VERSION.SDK_INT >= 26) connectivity.registerNetworkCallback(request, networkCallback, mainHandler)
-        else connectivity.registerNetworkCallback(request, networkCallback)
+    val netd by lazy @SuppressLint("WrongConstant") { context.getSystemService("netd")!! }
+
+    fun registerNetworkCallback(request: NetworkRequest, networkCallback: ConnectivityManager.NetworkCallback) =
+        connectivity.registerNetworkCallback(request, networkCallback, mainHandler)
 }

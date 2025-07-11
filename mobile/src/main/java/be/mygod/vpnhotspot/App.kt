@@ -4,18 +4,21 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
+import android.content.ContentProvider
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ProviderInfo
 import android.content.res.Configuration
 import android.location.LocationManager
 import android.os.Build
+import android.os.ext.SdkExtensions
 import android.provider.Settings
+import android.system.Os
 import android.util.Log
 import android.widget.Toast
 import androidx.annotation.Size
 import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
-import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import androidx.preference.PreferenceManager
 import be.mygod.librootkotlinx.NoShellException
@@ -24,18 +27,22 @@ import be.mygod.vpnhotspot.room.AppDatabase
 import be.mygod.vpnhotspot.root.RootManager
 import be.mygod.vpnhotspot.util.DeviceStorageApp
 import be.mygod.vpnhotspot.util.Services
+import be.mygod.vpnhotspot.util.privateLookup
 import be.mygod.vpnhotspot.widget.SmartSnackbar
-import com.google.firebase.analytics.ktx.ParametersBuilder
+import com.google.android.gms.dynamite.DynamiteModule
+import com.google.firebase.analytics.ParametersBuilder
 import com.google.firebase.analytics.ktx.analytics
+import com.google.firebase.analytics.logEvent
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import com.google.firebase.ktx.Firebase
-import com.google.firebase.ktx.initialize
+import com.google.firebase.provider.FirebaseInitProvider
 import kotlinx.coroutines.DEBUG_PROPERTY_NAME
 import kotlinx.coroutines.DEBUG_PROPERTY_VALUE_ON
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import timber.log.Timber
-import java.util.*
+import java.lang.invoke.MethodType
+import java.util.Locale
 
 class App : Application() {
     companion object {
@@ -43,27 +50,29 @@ class App : Application() {
         lateinit var app: App
     }
 
+    @SuppressLint("RestrictedApi")
     override fun onCreate() {
         super.onCreate()
         app = this
-        if (Build.VERSION.SDK_INT >= 24) @SuppressLint("RestrictedApi") {
-            deviceStorage = DeviceStorageApp(this)
-            // alternative to PreferenceManager.getDefaultSharedPreferencesName(this)
-            deviceStorage.moveSharedPreferencesFrom(this, PreferenceManager(this).sharedPreferencesName)
-            deviceStorage.moveDatabaseFrom(this, AppDatabase.DB_NAME)
-            BootReceiver.migrateIfNecessary()
-        } else deviceStorage = this
+        deviceStorage = DeviceStorageApp(this)
+        // alternative to PreferenceManager.getDefaultSharedPreferencesName(this)
+        deviceStorage.moveSharedPreferencesFrom(this, PreferenceManager(this).sharedPreferencesName)
+        deviceStorage.moveDatabaseFrom(this, AppDatabase.DB_NAME)
+        BootReceiver.migrateIfNecessary()
         Services.init { this }
 
         // overhead of debug mode is minimal: https://github.com/Kotlin/kotlinx.coroutines/blob/f528898/docs/debugging.md#debug-mode
         System.setProperty(DEBUG_PROPERTY_NAME, DEBUG_PROPERTY_VALUE_ON)
-        Firebase.initialize(deviceStorage)
-        when (val codename = Build.VERSION.CODENAME) {
-            "REL" -> { }
-            else -> FirebaseCrashlytics.getInstance().apply {
-                setCustomKey("codename", codename)
-                if (Build.VERSION.SDK_INT >= 23) setCustomKey("preview_sdk", Build.VERSION.PREVIEW_SDK_INT)
-            }
+        DynamiteModule::class.java.getDeclaredField("zzf").apply { isAccessible = true }.set(null, false)
+        // call super.attachInfo get around ProviderInfo check
+        FirebaseInitProvider::class.java.privateLookup().findSpecial(ContentProvider::class.java, "attachInfo",
+            MethodType.methodType(Void.TYPE, Context::class.java, ProviderInfo::class.java),
+            FirebaseInitProvider::class.java).bindTo(FirebaseInitProvider()).invokeWithArguments(deviceStorage, null)
+        FirebaseCrashlytics.getInstance().apply {
+            setCustomKey("uname.release", Os.uname().release)
+            setCustomKey("build", Build.DISPLAY)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) setCustomKey("extension_s",
+                SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S))
         }
         Timber.plant(object : Timber.DebugTree() {
             @SuppressLint("LogNotTimber")
@@ -103,10 +112,10 @@ class App : Application() {
      * logException is inappropriate sometimes because it flushes all logs that could be used to investigate other bugs.
      */
     fun logEvent(@Size(min = 1L, max = 40L) event: String, block: ParametersBuilder.() -> Unit = { }) {
-        val builder = ParametersBuilder()
-        builder.block()
-        Timber.i(if (builder.bundle.isEmpty) event else "$event, extras: ${builder.bundle}")
-        Firebase.analytics.logEvent(event, builder.bundle)
+        Firebase.analytics.logEvent(event) {
+            block(this)
+            Timber.i(if (bundle.isEmpty) event else "$event, extras: $bundle")
+        }
     }
 
     /**
@@ -115,19 +124,13 @@ class App : Application() {
      * https://android.googlesource.com/platform/frameworks/opt/net/wifi/+/53e0284/service/java/com/android/server/wifi/WifiSettingsStore.java#228
      */
     inline fun <reified T> startServiceWithLocation(context: Context) {
-        val canStart = Build.VERSION.SDK_INT >= 33 || if (Build.VERSION.SDK_INT >= 28) {
-            location?.isLocationEnabled == true
-        } else @Suppress("DEPRECATION") {
-            Settings.Secure.getInt(context.contentResolver, Settings.Secure.LOCATION_MODE,
-                Settings.Secure.LOCATION_MODE_OFF) != Settings.Secure.LOCATION_MODE_OFF
-        }
-        if (canStart) ContextCompat.startForegroundService(context, Intent(context, T::class.java)) else try {
+        if (Build.VERSION.SDK_INT < 33 && location?.isLocationEnabled != true) try {
             context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             Toast.makeText(context, R.string.tethering_location_off, Toast.LENGTH_LONG).show()
         } catch (e: ActivityNotFoundException) {
             app.logEvent("location_settings") { param("message", e.toString()) }
             SmartSnackbar.make(R.string.tethering_location_off).show()
-        }
+        } else context.startForegroundService(Intent(context, T::class.java))
     }
 
     lateinit var deviceStorage: Application
@@ -145,10 +148,10 @@ class App : Application() {
         CustomTabsIntent.Builder().apply {
             setColorScheme(CustomTabsIntent.COLOR_SCHEME_SYSTEM)
             setColorSchemeParams(CustomTabsIntent.COLOR_SCHEME_LIGHT, CustomTabColorSchemeParams.Builder().apply {
-                setToolbarColor(ContextCompat.getColor(app, R.color.light_colorPrimary))
+                setToolbarColor(resources.getColor(R.color.light_colorPrimary, theme))
             }.build())
             setColorSchemeParams(CustomTabsIntent.COLOR_SCHEME_DARK, CustomTabColorSchemeParams.Builder().apply {
-                setToolbarColor(ContextCompat.getColor(app, R.color.dark_colorPrimary))
+                setToolbarColor(resources.getColor(R.color.dark_colorPrimary, theme))
             }.build())
         }.build()
     }

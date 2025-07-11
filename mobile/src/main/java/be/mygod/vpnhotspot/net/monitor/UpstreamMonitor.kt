@@ -2,6 +2,7 @@ package be.mygod.vpnhotspot.net.monitor
 
 import android.content.SharedPreferences
 import android.net.LinkProperties
+import android.net.Network
 import be.mygod.vpnhotspot.App.Companion.app
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
@@ -19,6 +20,7 @@ abstract class UpstreamMonitor {
             return if (upstream.isNullOrEmpty()) VpnMonitor else InterfaceMonitor(upstream)
         }
         private var monitor = generateMonitor()
+        val currentNetwork get() = monitor.currentNetwork
 
         fun registerCallback(callback: Callback) = synchronized(this) { monitor.registerCallback(callback) }
         fun unregisterCallback(callback: Callback) = synchronized(this) { monitor.unregisterCallback(callback) }
@@ -45,19 +47,12 @@ abstract class UpstreamMonitor {
         /**
          * Called if some possibly stacked interface is available
          */
-        fun onAvailable(properties: LinkProperties? = null)
-        /**
-         * Called on API 23- from DefaultNetworkMonitor. This indicates that there isn't a good way of telling the
-         * default network (see DefaultNetworkMonitor) and we are using rules at priority 22000
-         * (RULE_PRIORITY_DEFAULT_NETWORK) as our fallback rules, which would work fine until Android 9.0 broke it in
-         * commit: https://android.googlesource.com/platform/system/netd/+/758627c4d93392190b08e9aaea3bbbfb92a5f364
-         */
-        fun onFallback() {
-            throw UnsupportedOperationException()
-        }
+        fun onAvailable(properties: LinkProperties? = null) { }
     }
 
     val callbacks = mutableSetOf<Callback>()
+    var currentNetwork: Network? = null
+        protected set
     protected abstract val currentLinkProperties: LinkProperties?
     protected abstract fun registerCallbackLocked(callback: Callback)
     abstract fun destroyLocked()

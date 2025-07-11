@@ -1,21 +1,22 @@
 package be.mygod.vpnhotspot.net
 
-import android.annotation.SuppressLint
-import android.annotation.TargetApi
 import android.net.LinkProperties
-import android.net.RouteInfo
-import android.os.Build
-import androidx.annotation.RequiresApi
+import android.net.MacAddress
+import android.os.Process
+import android.system.Os
 import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.R
+import be.mygod.vpnhotspot.net.dns.DnsForwarder
 import be.mygod.vpnhotspot.net.monitor.FallbackUpstreamMonitor
 import be.mygod.vpnhotspot.net.monitor.IpNeighbourMonitor
 import be.mygod.vpnhotspot.net.monitor.TrafficRecorder
 import be.mygod.vpnhotspot.net.monitor.UpstreamMonitor
+import be.mygod.vpnhotspot.net.monitor.VpnMonitor
 import be.mygod.vpnhotspot.room.AppDatabase
 import be.mygod.vpnhotspot.root.RootManager
 import be.mygod.vpnhotspot.root.RoutingCommands
-import be.mygod.vpnhotspot.util.*
+import be.mygod.vpnhotspot.util.RootSession
+import be.mygod.vpnhotspot.util.allInterfaceNames
 import be.mygod.vpnhotspot.widget.SmartSnackbar
 import kotlinx.coroutines.CancellationException
 import timber.log.Timber
@@ -41,11 +42,9 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
          *
          * Source: https://android.googlesource.com/platform/system/netd/+/b9baf26/server/RouteController.cpp#65
          */
-        private const val RULE_PRIORITY_DNS = 17700
         private const val RULE_PRIORITY_UPSTREAM = 17800
         private const val RULE_PRIORITY_UPSTREAM_FALLBACK = 17900
         private const val RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM = 17980
-        private const val RULE_PRIORITY_TETHERING = 18000
 
         private const val ROOT_DIR = "/system/bin/"
         const val IP = "${ROOT_DIR}ip"
@@ -67,7 +66,6 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
             commands.appendLine("while $IP6TABLES -D OUTPUT -j vpnhotspot_filter; do done")
             commands.appendLine("$IP6TABLES -F vpnhotspot_filter")
             commands.appendLine("$IP6TABLES -X vpnhotspot_filter")
-            commands.appendLine("while $IP rule del priority $RULE_PRIORITY_DNS; do done")
             commands.appendLine("while $IP rule del priority $RULE_PRIORITY_UPSTREAM; do done")
             commands.appendLine("while $IP rule del priority $RULE_PRIORITY_UPSTREAM_FALLBACK; do done")
             commands.appendLine("while $IP rule del priority $RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM; do done")
@@ -125,7 +123,6 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
          *
          * Source: https://android.googlesource.com/platform/system/netd/+/3b47c793ff7ade843b1d85a9be8461c3b4dc693e
          */
-        @RequiresApi(28)
         Netd,
     }
 
@@ -142,7 +139,7 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
         throw InterfaceNotFoundException(e)
     }
     private val hostSubnet = "${hostAddress.address.hostAddress}/${hostAddress.networkPrefixLength}"
-    private val transaction = RootSession.beginTransaction()
+    lateinit var transaction: RootSession.Transaction
 
     @Volatile
     private var stopped = false
@@ -151,41 +148,29 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
     private val upstreams = HashSet<String>()
     private class InterfaceGoneException(upstream: String) : IOException("Interface $upstream not found")
     private open inner class Upstream(val priority: Int) : UpstreamMonitor.Callback {
-        /**
-         * The only case when upstream is null is on API 23- and we are using system default rules.
-         */
         inner class Subrouting(priority: Int, val upstream: String) {
-            val ifindex = if (upstream.isEmpty()) 0 else if_nametoindex(upstream).also {
+            val ifindex = Os.if_nametoindex(upstream).also {
                 if (it <= 0) throw InterfaceGoneException(upstream)
             }
             val transaction = RootSession.beginTransaction().safeguard {
-                if (upstream.isEmpty()) {
-                    ipRule("goto $RULE_PRIORITY_TETHERING", priority)   // skip unreachable rule
-                } else ipRuleLookup(ifindex, priority)
-                @TargetApi(28) when (masqueradeMode) {
+                ipRuleLookup(ifindex, priority)
+                when (masqueradeMode) {
                     MasqueradeMode.None -> { }  // nothing to be done here
-                    MasqueradeMode.Simple -> {
-                        // note: specifying -i wouldn't work for POSTROUTING
-                        iptablesAdd(if (upstream.isEmpty()) {
-                            "vpnhotspot_masquerade -s $hostSubnet -j MASQUERADE"
-                        } else "vpnhotspot_masquerade -s $hostSubnet -o $upstream -j MASQUERADE", "nat")
-                    }
-                    MasqueradeMode.Netd -> {
-                        check(upstream.isNotEmpty())    // fallback is only needed for repeater on API 23 < 28
-                        /**
-                         * 0 means that there are no interface addresses coming after, which is unused anyway.
-                         *
-                         * https://android.googlesource.com/platform/frameworks/base/+/android-5.0.0_r1/services/core/java/com/android/server/NetworkManagementService.java#1251
-                         * https://android.googlesource.com/platform/system/netd/+/android-5.0.0_r1/server/CommandListener.cpp#638
-                         */
-                        ndc("Nat", "ndc nat enable $downstream $upstream 0")
-                    }
+                    // note: specifying -i wouldn't work for POSTROUTING
+                    MasqueradeMode.Simple -> iptablesAdd(
+                        "vpnhotspot_masquerade -s $hostSubnet -o $upstream -j MASQUERADE", "nat")
+                    /**
+                     * 0 means that there are no interface addresses coming after, which is unused anyway.
+                     *
+                     * https://android.googlesource.com/platform/frameworks/base/+/android-5.0.0_r1/services/core/java/com/android/server/NetworkManagementService.java#1251
+                     * https://android.googlesource.com/platform/system/netd/+/android-5.0.0_r1/server/CommandListener.cpp#638
+                     */
+                    MasqueradeMode.Netd -> ndc("Nat", "ndc nat enable $downstream $upstream 0")
                 }
             }
         }
 
         var subrouting = mutableMapOf<String, Subrouting>()
-        var dns = emptyList<Pair<InetAddress, String?>>()
 
         override fun onAvailable(properties: LinkProperties?) = synchronized(this@Routing) {
             if (stopped) return
@@ -203,38 +188,13 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
                 subrouting.remove(ifname)?.transaction?.revert()
                 check(upstreams.remove(ifname))
             }
-            val routes = properties?.allRoutes
-            dns = properties?.dnsServers?.map { dest ->
-                // based on:
-                // https://cs.android.com/android/platform/superproject/+/master:frameworks/base/packages/Tethering/src/com/android/networkstack/tethering/TetheringInterfaceUtils.java;l=88;drc=master
-                // https://cs.android.com/android/platform/superproject/+/master:frameworks/libs/net/common/framework/android/net/util/NetUtils.java;l=44;drc=de5905fe0407a1f5e115423d56c948ee2400683d
-                val size = dest.address.size
-                var bestRoute: RouteInfo? = null
-                for (route in routes!!) {
-                    if (route.destination.rawAddress.size == size && (bestRoute == null ||
-                                    bestRoute.destination.prefixLength < route.destination.prefixLength)) {
-                        try {
-                            if (route.matches(dest)) bestRoute = route
-                        } catch (e: RuntimeException) {
-                            Timber.w(e)
-                        }
-                    }
-                }
-                dest to bestRoute?.`interface`
-            } ?: emptyList()
-            updateDnsRoute()
         }
     }
-    private val fallbackUpstream = object : Upstream(RULE_PRIORITY_UPSTREAM_FALLBACK) {
-        @SuppressLint("NewApi")
-        override fun onFallback() = onAvailable(LinkProperties().apply {
-            interfaceName = ""
-            setDnsServers(listOf(parseNumericAddress("8.8.8.8")))
-        })
-    }
+    private val fallbackUpstream = Upstream(RULE_PRIORITY_UPSTREAM_FALLBACK)
     private val upstream = Upstream(RULE_PRIORITY_UPSTREAM)
+    private val emptyCallback = object : UpstreamMonitor.Callback { }
 
-    private inner class Client(private val ip: Inet4Address, mac: MacAddressCompat) : AutoCloseable {
+    private inner class Client(private val ip: Inet4Address, mac: MacAddress) : AutoCloseable {
         private val transaction = RootSession.beginTransaction().safeguard {
             val address = ip.hostAddress
             iptablesInsert("vpnhotspot_acl -i $downstream -s $address -j ACCEPT")
@@ -287,9 +247,9 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
      * but may be broken when system tethering shutdown before local-only interfaces.
      */
     fun ipForward() {
-        if (Build.VERSION.SDK_INT >= 23) try {
+        try {
             transaction.ndc("ipfwd", "ndc ipfwd enable vpnhotspot_$downstream",
-                    "ndc ipfwd disable vpnhotspot_$downstream")
+                "ndc ipfwd disable vpnhotspot_$downstream")
             return
         } catch (e: RoutingCommands.UnexpectedOutputException) {
             Timber.w(IOException("ndc ipfwd enable failure", e))
@@ -325,61 +285,56 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
         }
     }
 
-    private inner class DnsRoute(val ifindex: Int, val dns: String) {
-        val transaction = RootSession.beginTransaction().safeguard {
-            val hostAddress = hostAddress.address.hostAddress
-            if (ifindex != 0) ipRuleLookup(ifindex, RULE_PRIORITY_DNS, "to $dns")
-            iptablesAdd("PREROUTING -i $downstream -p tcp -d $hostAddress --dport 53 -j DNAT --to-destination $dns", "nat")
-            iptablesAdd("PREROUTING -i $downstream -p udp -d $hostAddress --dport 53 -j DNAT --to-destination $dns", "nat")
-        }
-    }
-    private var currentDns: DnsRoute? = null
-    private fun updateDnsRoute() {
-        val selected = sequenceOf(upstream, fallbackUpstream).flatMap { upstream ->
-            upstream.dns.asSequence().map { (server, iface) ->
-                ((if (iface != null) upstream.subrouting[iface]?.ifindex else null) ?: 0) to server
-            }
-        }.firstOrNull { it.second is Inet4Address }
-        val ifindex = selected?.first ?: 0
-        var dns = selected?.second?.hostAddress
-        if (dns.isNullOrBlank()) dns = null
-        if (ifindex != currentDns?.ifindex || dns != currentDns?.dns) {
-            currentDns?.transaction?.revert()
-            currentDns = if (dns == null) null else try {
-                DnsRoute(ifindex, dns)
-            } catch (_: CancellationException) {
-                null
-            } catch (e: Exception) {
-                Timber.w(e)
-                SmartSnackbar.make(e).show()
-                null
-            }
-        }
-    }
-
     fun stop() {
         synchronized(this) { stopped = true }
         IpNeighbourMonitor.unregisterCallback(this)
+        DnsForwarder.unregisterClient(this)
         FallbackUpstreamMonitor.unregisterCallback(fallbackUpstream)
         UpstreamMonitor.unregisterCallback(upstream)
+        VpnMonitor.unregisterCallback(emptyCallback)
         Timber.i("Stopped routing for $downstream by $caller")
+    }
+
+    /**
+     * Allow protect UDP sockets which will be used by DnsForwarder. Must call this first.
+     */
+    fun allowProtect() {
+        val command = "ndc network protect allow ${Process.myUid()}"
+        val result = transaction.execQuiet(command)
+        val suffix = "200 0 success\n"
+        result.check(listOf(command), !result.out.endsWith(suffix))
+        if (result.out.length > suffix.length) Timber.i(result.message(listOf(command), true))
     }
 
     fun commit() {
         transaction.ipRule("unreachable", RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM)
+        val useLocalnet = Os.uname().release.split('.', limit = 3).let { version ->
+            val major = version[0].toInt()
+            // https://github.com/torvalds/linux/commit/d0daebc3d622f95db181601cb0c4a0781f74f758
+            major > 3 || major == 3 && version[1].toInt() >= 6
+        }
+        val forwarder = DnsForwarder.registerClient(this, useLocalnet)
+        val hostAddress = hostAddress.address.hostAddress
+        val forwarderIp = if (useLocalnet) {
+            transaction.exec("echo 1 >/proc/sys/net/ipv4/conf/all/route_localnet")
+            "127.0.0.1"
+        } else hostAddress
+        VpnFirewallManager.setup(transaction)
+        transaction.iptablesInsert("PREROUTING -i $downstream -p tcp -d $hostAddress --dport 53 -j DNAT --to-destination $forwarderIp:${forwarder.tcpPort}", "nat")
+        transaction.iptablesInsert("PREROUTING -i $downstream -p udp -d $hostAddress --dport 53 -j DNAT --to-destination $forwarderIp:${forwarder.udpPort}", "nat")
         transaction.commit()
         Timber.i("Started routing for $downstream by $caller")
         FallbackUpstreamMonitor.registerCallback(fallbackUpstream)
         UpstreamMonitor.registerCallback(upstream)
         IpNeighbourMonitor.registerCallback(this, true)
+        if (VpnFirewallManager.mayBeAffected) VpnMonitor.registerCallback(emptyCallback)
     }
     fun revert() {
+        transaction.revert()
         stop()
         TrafficRecorder.update()    // record stats before exiting to prevent stats losing
         synchronized(this) { clients.values.forEach { it.close() } }
-        currentDns?.transaction?.revert()
         fallbackUpstream.subrouting.values.forEach { it.transaction.revert() }
         upstream.subrouting.values.forEach { it.transaction.revert() }
-        transaction.revert()
     }
 }

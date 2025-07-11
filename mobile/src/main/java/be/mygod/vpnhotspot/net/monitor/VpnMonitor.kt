@@ -4,6 +4,7 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import be.mygod.vpnhotspot.net.VpnFirewallManager
 import be.mygod.vpnhotspot.util.Services
 import be.mygod.vpnhotspot.util.globalNetworkRequestBuilder
 import kotlinx.coroutines.GlobalScope
@@ -18,30 +19,34 @@ object VpnMonitor : UpstreamMonitor() {
     private var registered = false
 
     private val available = HashMap<Network, LinkProperties?>()
-    private var currentNetwork: Network? = null
     override val currentLinkProperties: LinkProperties? get() = currentNetwork?.let { available[it] }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        private fun fireCallbacks(properties: LinkProperties?, callbacks: Iterable<Callback>) = GlobalScope.launch {
+            if (properties != null) VpnFirewallManager.excludeIfNeeded(this)
+            callbacks.forEach { it.onAvailable(properties) }
+        }
+
         override fun onAvailable(network: Network) {
             val properties = Services.connectivity.getLinkProperties(network)
-            synchronized(this@VpnMonitor) {
+            fireCallbacks(properties, synchronized(this@VpnMonitor) {
                 available[network] = properties
                 currentNetwork = network
                 callbacks.toList()
-            }.forEach { it.onAvailable(properties) }
+            })
         }
 
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
-            synchronized(this@VpnMonitor) {
+            fireCallbacks(properties, synchronized(this@VpnMonitor) {
                 available[network] = properties
                 if (currentNetwork == null) currentNetwork = network
                 else if (currentNetwork != network) return
                 callbacks.toList()
-            }.forEach { it.onAvailable(properties) }
+            })
         }
 
         override fun onLost(network: Network) {
             var properties: LinkProperties? = null
-            synchronized(this@VpnMonitor) {
+            val callbacks = synchronized(this@VpnMonitor) {
                 if (available.remove(network) == null || currentNetwork != network) return
                 if (available.isNotEmpty()) {
                     val next = available.entries.first()
@@ -50,7 +55,8 @@ object VpnMonitor : UpstreamMonitor() {
                     properties = next.value
                 } else currentNetwork = null
                 callbacks.toList()
-            }.forEach { it.onAvailable(properties) }
+            }
+            fireCallbacks(properties, callbacks)
         }
     }
 
@@ -61,7 +67,7 @@ object VpnMonitor : UpstreamMonitor() {
                 callback.onAvailable(currentLinkProperties)
             }
         } else {
-            Services.registerNetworkCallbackCompat(request, networkCallback)
+            Services.registerNetworkCallback(request, networkCallback)
             registered = true
         }
     }

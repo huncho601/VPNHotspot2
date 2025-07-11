@@ -3,11 +3,11 @@ package be.mygod.vpnhotspot.preference
 import android.content.Context
 import android.graphics.Typeface
 import android.net.LinkProperties
-import android.os.Build
 import android.text.SpannableStringBuilder
 import android.text.style.StyleSpan
 import android.util.AttributeSet
 import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.Preference
@@ -17,6 +17,7 @@ import be.mygod.vpnhotspot.net.monitor.UpstreamMonitor
 import be.mygod.vpnhotspot.util.allRoutes
 import be.mygod.vpnhotspot.util.format
 import be.mygod.vpnhotspot.util.parseNumericAddress
+import kotlinx.coroutines.launch
 import timber.log.Timber
 
 class UpstreamsPreference(context: Context, attrs: AttributeSet) : Preference(context, attrs),
@@ -41,7 +42,7 @@ class UpstreamsPreference(context: Context, attrs: AttributeSet) : Preference(co
                     internet == true || try {
                         route.matches(internetV4Address) || route.matches(internetV6Address)
                     } catch (e: RuntimeException) {
-                        if (Build.VERSION.SDK_INT >= 23) Timber.w(e) else Timber.d(e)
+                        Timber.w(e)
                         false
                     }
                 }
@@ -52,15 +53,10 @@ class UpstreamsPreference(context: Context, attrs: AttributeSet) : Preference(co
     }
 
     private val primary = Monitor()
-    private val fallback: Monitor = object : Monitor() {
-        override fun onFallback() {
-            currentInterfaces = mapOf("<default>" to true)
-            onUpdate()
-        }
-    }
+    private val fallback = Monitor()
 
-    init {
-        (context as LifecycleOwner).lifecycle.addObserver(this)
+    fun attachListener(lifecycle: Lifecycle) {
+        lifecycle.addObserver(this)
         onUpdate()
     }
 
@@ -73,8 +69,10 @@ class UpstreamsPreference(context: Context, attrs: AttributeSet) : Preference(co
         FallbackUpstreamMonitor.unregisterCallback(fallback)
     }
 
-    private fun onUpdate() = (context as LifecycleOwner).lifecycleScope.launchWhenStarted {
-        summary = context.getText(R.string.settings_service_upstream_monitor_summary).format(
-            context.resources.configuration.locale, primary.charSequence, fallback.charSequence)
+    private fun onUpdate() {
+        (context as LifecycleOwner).lifecycleScope.launch {
+            summary = context.getText(R.string.settings_service_upstream_monitor_summary).format(
+                context.resources.configuration.locales[0], primary.charSequence, fallback.charSequence)
+        }
     }
 }

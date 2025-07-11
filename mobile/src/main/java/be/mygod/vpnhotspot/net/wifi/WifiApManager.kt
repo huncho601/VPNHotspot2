@@ -2,6 +2,7 @@ package be.mygod.vpnhotspot.net.wifi
 
 import android.annotation.TargetApi
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Resources
 import android.net.wifi.SoftApConfiguration
@@ -11,6 +12,13 @@ import android.os.Handler
 import android.os.Parcelable
 import androidx.annotation.RequiresApi
 import be.mygod.vpnhotspot.App.Companion.app
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.EXTRA_WIFI_AP_STATE
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.WIFI_AP_STATE_CHANGED_ACTION
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.WIFI_AP_STATE_DISABLED
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.WIFI_AP_STATE_DISABLING
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.WIFI_AP_STATE_ENABLED
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.WIFI_AP_STATE_ENABLING
+import be.mygod.vpnhotspot.net.wifi.WifiApManager.WIFI_AP_STATE_FAILED
 import be.mygod.vpnhotspot.util.*
 import timber.log.Timber
 import java.lang.reflect.InvocationHandler
@@ -27,11 +35,24 @@ object WifiApManager {
     @RequiresApi(30)
     const val RESOURCES_PACKAGE = "com.android.wifi.resources"
     /**
-     * Based on: https://android.googlesource.com/platform/frameworks/opt/net/wifi/+/000ad45/service/java/com/android/server/wifi/WifiContext.java#66
+     * Based on: https://cs.android.com/android/platform/superproject/+/master:packages/modules/Wifi/framework/java/android/net/wifi/WifiContext.java;l=66;drc=5ca657189aac546af0aafaba11bbc9c5d889eab3
      */
     @get:RequiresApi(30)
-    val resolvedActivity get() = app.packageManager.queryIntentActivities(Intent(ACTION_RESOURCES_APK),
-            PackageManager.MATCH_SYSTEM_ONLY).single()
+    val resolvedActivity: ActivityInfo get() {
+        val list = app.packageManager.queryIntentActivities(Intent(ACTION_RESOURCES_APK),
+            PackageManager.MATCH_SYSTEM_ONLY).distinctBy { it.activityInfo.applicationInfo.packageName }
+        require(list.isNotEmpty()) { "Missing $ACTION_RESOURCES_APK" }
+        if (list.size > 1) {
+            list.singleOrNull {
+                it.activityInfo.applicationInfo.sourceDir.startsWith("/apex/com.android.wifi")
+            }?.let { return it.activityInfo }
+            Timber.w(Exception("Found > 1 apk: " + list.joinToString {
+                val info = it.activityInfo.applicationInfo
+                "${info.packageName} (${info.sourceDir})"
+            }))
+        }
+        return list[0].activityInfo
+    }
 
     private const val CONFIG_P2P_MAC_RANDOMIZATION_SUPPORTED = "config_wifi_p2p_mac_randomization_supported"
     val p2pMacRandomizationSupported get() = try {
@@ -40,7 +61,7 @@ object WifiApManager {
                 getBoolean(getIdentifier(CONFIG_P2P_MAC_RANDOMIZATION_SUPPORTED, "bool", "android"))
             }
             in 30..Int.MAX_VALUE -> @TargetApi(30) {
-                val info = resolvedActivity.activityInfo
+                val info = resolvedActivity
                 val resources = app.packageManager.getResourcesForApplication(info.applicationInfo)
                 resources.getBoolean(resources.findIdentifier(CONFIG_P2P_MAC_RANDOMIZATION_SUPPORTED, "bool",
                     RESOURCES_PACKAGE, info.packageName))
@@ -88,7 +109,6 @@ object WifiApManager {
      *
      * Source: https://android.googlesource.com/platform/frameworks/base/+/android-6.0.0_r1/wifi/java/android/net/wifi/WifiManager.java#210
      */
-    @get:RequiresApi(23)
     val EXTRA_WIFI_AP_FAILURE_REASON get() =
         if (Build.VERSION.SDK_INT >= 30) "android.net.wifi.extra.WIFI_AP_FAILURE_REASON" else "wifi_ap_error_code"
     /**
@@ -98,7 +118,6 @@ object WifiApManager {
      *
      * Source: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/wifi/java/android/net/wifi/WifiManager.java#413
      */
-    @get:RequiresApi(26)
     val EXTRA_WIFI_AP_INTERFACE_NAME get() =
         if (Build.VERSION.SDK_INT >= 30) "android.net.wifi.extra.WIFI_AP_INTERFACE_NAME" else "wifi_ap_interface_name"
 
@@ -177,7 +196,6 @@ object WifiApManager {
         setWifiApConfiguration(Services.wifi, value) as Boolean
     fun setConfiguration(value: SoftApConfiguration) = setSoftApConfiguration(Services.wifi, value) as Boolean
 
-    @RequiresApi(28)
     interface SoftApCallbackCompat {
         /**
          * Called when soft AP state changes.
@@ -238,11 +256,24 @@ object WifiApManager {
          */
         @RequiresApi(30)
         fun onBlockedClientConnecting(client: Parcelable, blockedReason: Int) { }
+
+        /**
+         * Called when clients disconnect from a soft AP instance.
+         *
+         * @param info The [SoftApInfo] of the AP.
+         * @param clients The clients that have disconnected from the AP instance specified by
+         * `info`.
+         */
+        @RequiresApi(30)
+        fun onClientsDisconnected(info: Parcelable, clients: List<Parcelable>) { }
     }
-    @RequiresApi(23)
     val failureReasonLookup = ConstantLookup<WifiManager>("SAP_START_FAILURE_", "GENERAL", "NO_CHANNEL")
     @get:RequiresApi(30)
     val clientBlockLookup by lazy { ConstantLookup<WifiManager>("SAP_CLIENT_") }
+    @get:RequiresApi(30)
+    val deauthenticationReasonLookup by lazy {
+        ConstantLookup("REASON_") { Class.forName("android.net.wifi.DeauthenticationReasonCode") }
+    }
 
     private val interfaceSoftApCallback by lazy { Class.forName("android.net.wifi.WifiManager\$SoftApCallback") }
     private val registerSoftApCallback by lazy {
@@ -255,7 +286,6 @@ object WifiApManager {
         WifiManager::class.java.getDeclaredMethod("unregisterSoftApCallback", interfaceSoftApCallback)
     }
 
-    @RequiresApi(28)
     fun registerSoftApCallback(callback: SoftApCallbackCompat, executor: Executor): Any {
         val proxy = Proxy.newProxyInstance(interfaceSoftApCallback.classLoader,
                 arrayOf(interfaceSoftApCallback), object : InvocationHandler {
@@ -270,7 +300,7 @@ object WifiApManager {
                     method.matches("onStateChanged", Integer.TYPE, Integer.TYPE) -> {
                         callback.onStateChanged(args!![0] as Int, args[1] as Int)
                     }
-                    method.matches("onNumClientsChanged", Integer.TYPE) -> @Suppress("DEPRECATION") {
+                    method.matches("onNumClientsChanged", Integer.TYPE) -> {
                         if (Build.VERSION.SDK_INT >= 30) Timber.w(Exception("Unexpected onNumClientsChanged"))
                         callback.onNumClientsChanged(args!![0] as Int)
                     }
@@ -279,10 +309,13 @@ object WifiApManager {
                         @Suppress("UNCHECKED_CAST")
                         callback.onConnectedClientsChanged(args!![0] as List<Parcelable>)
                     }
-                    method.matches1<java.util.List<*>>("onInfoChanged") -> @TargetApi(31) {
-                        if (Build.VERSION.SDK_INT < 31) Timber.w(Exception("Unexpected onInfoChanged API 31+"))
+                    method.matches1<java.util.List<*>>("onInfoChanged") -> @TargetApi(30) {
+                        if (Build.VERSION.SDK_INT < 30) Timber.w(Exception("Unexpected onInfoChanged"))
                         @Suppress("UNCHECKED_CAST")
-                        callback.onInfoChanged(args!![0] as List<Parcelable>)
+                        val list = args!![0] as List<Parcelable>
+                        if (Build.VERSION.SDK_INT >= 35) for (info in list) (SoftApInfo.getVendorData(info) as List<*>?)
+                            .let { if (!it.isNullOrEmpty()) Timber.w(Exception(it.toString())) }
+                        callback.onInfoChanged(list)
                     }
                     Build.VERSION.SDK_INT >= 30 && method.matches("onInfoChanged", SoftApInfo.clazz) -> {
                         if (Build.VERSION.SDK_INT >= 31) return null    // ignore old version calls
@@ -298,6 +331,11 @@ object WifiApManager {
                         Int::class.java) -> {
                         callback.onBlockedClientConnecting(args!![0] as Parcelable, args[1] as Int)
                     }
+                    Build.VERSION.SDK_INT >= 30 && method.matches("onClientsDisconnected", SoftApInfo.clazz,
+                        List::class.java) -> {
+                        @Suppress("UNCHECKED_CAST")
+                        callback.onClientsDisconnected(args!![0] as Parcelable, args[1] as List<Parcelable>)
+                    }
                     else -> callSuper(interfaceSoftApCallback, proxy, method, args)
                 }
             }
@@ -307,8 +345,17 @@ object WifiApManager {
         } else registerSoftApCallback(Services.wifi, proxy, null)
         return proxy
     }
-    @RequiresApi(28)
     fun unregisterSoftApCallback(key: Any) = unregisterSoftApCallback(Services.wifi, key)
+
+    @get:RequiresApi(30)
+    private val startLocalOnlyHotspot by lazy @TargetApi(30) {
+        WifiManager::class.java.getDeclaredMethod("startLocalOnlyHotspot", SoftApConfiguration::class.java,
+            Executor::class.java, WifiManager.LocalOnlyHotspotCallback::class.java)
+    }
+    @RequiresApi(30)
+    fun startLocalOnlyHotspot(config: SoftApConfiguration, callback: WifiManager.LocalOnlyHotspotCallback?,
+                              executor: Executor? = null) =
+        startLocalOnlyHotspot(Services.wifi, config, executor, callback)
 
     private val cancelLocalOnlyHotspotRequest by lazy {
         WifiManager::class.java.getDeclaredMethod("cancelLocalOnlyHotspotRequest")
@@ -317,43 +364,5 @@ object WifiApManager {
      * This is the only way to unregister requests besides app exiting.
      * Therefore, we are happy with crashing the app if reflection fails.
      */
-    @RequiresApi(26)
     fun cancelLocalOnlyHotspotRequest() = cancelLocalOnlyHotspotRequest(Services.wifi)
-
-    @Suppress("DEPRECATION")
-    private val setWifiApEnabled by lazy {
-        WifiManager::class.java.getDeclaredMethod("setWifiApEnabled",
-                android.net.wifi.WifiConfiguration::class.java, Boolean::class.java)
-    }
-    /**
-     * Start AccessPoint mode with the specified
-     * configuration. If the radio is already running in
-     * AP mode, update the new configuration
-     * Note that starting in access point mode disables station
-     * mode operation
-     * @param wifiConfig SSID, security and channel details as
-     *        part of WifiConfiguration
-     * @return {@code true} if the operation succeeds, {@code false} otherwise
-     */
-    @Suppress("DEPRECATION")
-    private fun WifiManager.setWifiApEnabled(wifiConfig: android.net.wifi.WifiConfiguration?, enabled: Boolean) =
-            setWifiApEnabled(this, wifiConfig, enabled) as Boolean
-
-    /**
-     * Although the functionalities were removed in API 26, it is already not functioning correctly on API 25.
-     *
-     * See also: https://android.googlesource.com/platform/frameworks/base/+/5c0b10a4a9eecc5307bb89a271221f2b20448797%5E%21/
-     */
-    @Suppress("DEPRECATION")
-    @Deprecated("Not usable since API 26, malfunctioning on API 25")
-    fun start(wifiConfig: android.net.wifi.WifiConfiguration? = null) {
-        Services.wifi.isWifiEnabled = false
-        Services.wifi.setWifiApEnabled(wifiConfig, true)
-    }
-    @Suppress("DEPRECATION")
-    @Deprecated("Not usable since API 26")
-    fun stop() {
-        Services.wifi.setWifiApEnabled(null, false)
-        Services.wifi.isWifiEnabled = true
-    }
 }

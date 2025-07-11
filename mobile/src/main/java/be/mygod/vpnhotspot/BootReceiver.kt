@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Parcelable
-import androidx.annotation.RequiresApi
 import be.mygod.librootkotlinx.toByteArray
 import be.mygod.librootkotlinx.toParcelable
 import be.mygod.vpnhotspot.App.Companion.app
@@ -30,12 +29,7 @@ class BootReceiver : BroadcastReceiver() {
                     else PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
         private val userEnabled get() = app.pref.getBoolean(KEY, false)
         fun onUserSettingUpdated(shouldStart: Boolean) {
-            enabled = shouldStart && try {
-                config
-            } catch (e: Exception) {
-                Timber.w(e)
-                null
-            }?.startables?.isEmpty() == false
+            enabled = shouldStart && config?.startables?.isEmpty() == false
         }
         private fun onConfigUpdated(isNotEmpty: Boolean) {
             enabled = isNotEmpty && userEnabled
@@ -44,37 +38,35 @@ class BootReceiver : BroadcastReceiver() {
         private const val FILENAME = "bootconfig"
         private val configFile by lazy { File(app.deviceStorage.noBackupFilesDir, FILENAME) }
         private val config: Config? get() = try {
-            DataInputStream(configFile.inputStream()).use { it.readBytes().toParcelable() }
+            DataInputStream(configFile.inputStream()).use {
+                it.readBytes().toParcelable(Config::class.java.classLoader)
+            }
         } catch (_: FileNotFoundException) {
             null
+        } catch (e: Exception) {
+            Timber.w("Boot config corrupted", e)
+            null
         }
-        private fun updateConfig(work: Config.() -> Unit) = synchronized(BootReceiver) {
-            val config = try {
-                config
-            } catch (e: Exception) {
-                Timber.i("Boot config corrupted", e)
-                null
-            } ?: Config()
-            config.work()
-            DataOutputStream(configFile.outputStream()).use { it.write(config.toByteArray()) }
+        private fun updateConfig(work: Config.() -> Boolean) = synchronized(BootReceiver) {
+            val config = config ?: Config()
+            if (config.work()) DataOutputStream(configFile.outputStream()).use { it.write(config.toByteArray()) }
             config
         }
 
         fun add(key: String, value: Startable) = try {
-            updateConfig { startables[key] = value }
+            updateConfig { startables.put(key, value).let { true } }
             onConfigUpdated(true)
         } catch (e: Exception) {
             Timber.w(e)
         }
         fun delete(key: String) = try {
-            onConfigUpdated(updateConfig { startables.remove(key) }.startables.isNotEmpty())
+            onConfigUpdated(updateConfig { startables.remove(key) != null }.startables.isNotEmpty())
         } catch (e: Exception) {
             Timber.w(e)
         }
         inline fun <reified T> add(value: Startable) = add(T::class.java.name, value)
         inline fun <reified T> delete() = delete(T::class.java.name)
 
-        @RequiresApi(24)
         fun migrateIfNecessary() {
             val oldFile = File(app.noBackupFilesDir, FILENAME)
             if (oldFile.canRead()) try {
@@ -87,12 +79,7 @@ class BootReceiver : BroadcastReceiver() {
         private var started = false
         private fun startIfNecessary() {
             if (started) return
-            val config = try {
-                synchronized(BootReceiver) { config }
-            } catch (e: Exception) {
-                Timber.w(e)
-                null
-            }
+            val config = synchronized(BootReceiver) { config }
             if (config == null || config.startables.isEmpty()) {
                 enabled = false
             } else for (startable in config.startables.values) startable.start(app)

@@ -3,6 +3,7 @@ package be.mygod.vpnhotspot
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.ext.SdkExtensions
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.Preference
@@ -17,13 +18,13 @@ import be.mygod.vpnhotspot.net.wifi.WifiDoubleLock
 import be.mygod.vpnhotspot.preference.AutoCompleteNetworkPreferenceDialogFragment
 import be.mygod.vpnhotspot.preference.SharedPreferenceDataStore
 import be.mygod.vpnhotspot.preference.SummaryFallbackProvider
+import be.mygod.vpnhotspot.preference.UpstreamsPreference
 import be.mygod.vpnhotspot.root.Dump
 import be.mygod.vpnhotspot.root.RootManager
 import be.mygod.vpnhotspot.util.Services
 import be.mygod.vpnhotspot.util.launchUrl
 import be.mygod.vpnhotspot.util.showAllowingStateLoss
 import be.mygod.vpnhotspot.widget.SmartSnackbar
-import com.google.android.gms.oss.licenses.OssLicensesMenuActivity
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,7 @@ import java.io.PrintWriter
 import kotlin.system.exitProcess
 
 class SettingsPreferenceFragment : PreferenceFragmentCompat() {
+    private fun Preference.remove() = parent!!.removePreference(this)
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         // handle complicated default value and possible system upgrades
         WifiDoubleLock.mode = WifiDoubleLock.mode
@@ -44,27 +46,26 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         IpMonitor.currentMode = IpMonitor.currentMode
         preferenceManager.preferenceDataStore = SharedPreferenceDataStore(app.pref)
         addPreferencesFromResource(R.xml.pref_settings)
+        findPreference<UpstreamsPreference>("service.upstream.monitor")!!.attachListener(lifecycle)
         SummaryFallbackProvider(findPreference(UpstreamMonitor.KEY)!!)
         SummaryFallbackProvider(findPreference(FallbackUpstreamMonitor.KEY)!!)
         findPreference<TwoStatePreference>("system.enableTetherOffload")!!.apply {
-            if (TetherOffloadManager.supported) {
-                isChecked = TetherOffloadManager.enabled
-                setOnPreferenceChangeListener { _, newValue ->
-                    if (TetherOffloadManager.enabled != newValue) viewLifecycleOwner.lifecycleScope.launchWhenCreated {
-                        isEnabled = false
-                        try {
-                            TetherOffloadManager.setEnabled(newValue as Boolean)
-                        } catch (_: CancellationException) {
-                        } catch (e: Exception) {
-                            Timber.w(e)
-                            SmartSnackbar.make(e).show()
-                        }
-                        isChecked = TetherOffloadManager.enabled
-                        isEnabled = true
+            isChecked = TetherOffloadManager.enabled
+            setOnPreferenceChangeListener { _, newValue ->
+                if (TetherOffloadManager.enabled != newValue) viewLifecycleOwner.lifecycleScope.launch {
+                    isEnabled = false
+                    try {
+                        TetherOffloadManager.setEnabled(newValue as Boolean)
+                    } catch (_: CancellationException) {
+                    } catch (e: Exception) {
+                        Timber.w(e)
+                        SmartSnackbar.make(e).show()
                     }
-                    false
+                    isChecked = TetherOffloadManager.enabled
+                    isEnabled = true
                 }
-            } else parent!!.removePreference(this)
+                false
+            }
         }
         findPreference<TwoStatePreference>(BootReceiver.KEY)!!.setOnPreferenceChangeListener { _, value ->
             BootReceiver.onUserSettingUpdated(value as Boolean)
@@ -72,8 +73,9 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         }
         if (Services.p2p == null || !RepeaterService.safeModeConfigurable) {
             val safeMode = findPreference<Preference>(RepeaterService.KEY_SAFE_MODE)!!
-            safeMode.parent!!.removePreference(safeMode)
+            safeMode.remove()
         }
+        if (Build.VERSION.SDK_INT < 30) findPreference<Preference>(LocalOnlyHotspotService.KEY_USE_SYSTEM)!!.remove()
         findPreference<Preference>("service.clean")!!.setOnPreferenceClickListener {
             GlobalScope.launch { RoutingManager.clean() }
             true
@@ -97,7 +99,10 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
                 val logFile = File.createTempFile("vpnhotspot-", ".log", logDir)
                 logFile.outputStream().use { out ->
                     PrintWriter(out.bufferedWriter()).use { writer ->
-                        writer.println("${BuildConfig.VERSION_CODE} is running on API ${Build.VERSION.SDK_INT}\n")
+                        writer.println("${BuildConfig.VERSION_CODE} is running on API ${Build.VERSION.SDK_INT}")
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) writer.println(
+                            "S extension ${SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S)}")
+                        writer.println()
                         writer.flush()
                         try {
                             Runtime.getRuntime().exec(arrayOf("logcat", "-d")).inputStream.use { it.copyTo(out) }
@@ -130,11 +135,11 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
             true
         }
         findPreference<Preference>("misc.donate")!!.setOnPreferenceClickListener {
-            EBegFragment().showAllowingStateLoss(parentFragmentManager, "EBegFragment")
+            requireContext().launchUrl("https://mygod.be/donate/")
             true
         }
         findPreference<Preference>("misc.licenses")!!.setOnPreferenceClickListener {
-            startActivity(Intent(context, OssLicensesMenuActivity::class.java))
+            startActivity(Intent(requireContext(), AboutLibrariesActivity::class.java))
             true
         }
     }

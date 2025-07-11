@@ -1,6 +1,5 @@
 package be.mygod.vpnhotspot.manage
 
-import android.content.Context
 import android.content.Intent
 import android.view.View
 import androidx.databinding.BaseObservable
@@ -16,7 +15,7 @@ object ManageBar : Manager() {
     private const val SETTINGS_2 = "com.android.settings.TetherSettings"
 
     object Data : BaseObservable() {
-        val offloadEnabled get() = TetherOffloadManager.supported && TetherOffloadManager.enabled
+        val offloadEnabled get() = TetherOffloadManager.enabled
     }
     class ViewHolder(binding: ListitemManageBinding) : RecyclerView.ViewHolder(binding.root), View.OnClickListener {
         init {
@@ -24,17 +23,18 @@ object ManageBar : Manager() {
             binding.root.setOnClickListener(this)
         }
 
-        override fun onClick(v: View?) = start(itemView.context)
+        override fun onClick(v: View?) = start(itemView.context::startActivity)
     }
 
     override val type: Int get() = VIEW_TYPE_MANAGE
 
-    fun start(context: Context) {
+    fun start(startActivity: (Intent) -> Unit) {
+        val intent = Intent().setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            context.startActivity(Intent().setClassName(SETTINGS_PACKAGE, SETTINGS_1))
+            startActivity(intent.setClassName(SETTINGS_PACKAGE, SETTINGS_1))
         } catch (e1: RuntimeException) {
             try {
-                context.startActivity(Intent().setClassName(SETTINGS_PACKAGE, SETTINGS_2))
+                startActivity(intent.setClassName(SETTINGS_PACKAGE, SETTINGS_2))
                 app.logEvent(TAG) { param(SETTINGS_1, e1.toString()) }
             } catch (e2: RuntimeException) {
                 app.logEvent(TAG) {

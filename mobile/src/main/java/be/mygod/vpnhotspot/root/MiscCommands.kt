@@ -1,24 +1,40 @@
 package be.mygod.vpnhotspot.root
 
 import android.content.Context
+import android.net.TetheringManager
 import android.os.Build
 import android.os.Parcelable
 import android.os.RemoteException
 import android.provider.Settings
 import androidx.annotation.RequiresApi
-import be.mygod.librootkotlinx.*
+import be.mygod.librootkotlinx.ParcelableBoolean
+import be.mygod.librootkotlinx.ParcelableInt
+import be.mygod.librootkotlinx.ParcelableString
+import be.mygod.librootkotlinx.RootCommand
+import be.mygod.librootkotlinx.RootCommandChannel
+import be.mygod.librootkotlinx.RootCommandNoResult
+import be.mygod.librootkotlinx.isEBADF
 import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.net.Routing.Companion.IP
 import be.mygod.vpnhotspot.net.Routing.Companion.IPTABLES
-import be.mygod.vpnhotspot.net.TetheringManager
+import be.mygod.vpnhotspot.net.TetheringManagerCompat
+import be.mygod.vpnhotspot.net.VpnFirewallManager
 import be.mygod.vpnhotspot.util.Services
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.onClosed
 import kotlinx.coroutines.channels.onFailure
 import kotlinx.coroutines.channels.produce
+import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
+import timber.log.Timber
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InterruptedIOException
 
 fun ProcessBuilder.fixPath(redirect: Boolean = false) = apply {
@@ -30,18 +46,10 @@ fun ProcessBuilder.fixPath(redirect: Boolean = false) = apply {
 
 @Parcelize
 data class Dump(val path: String, val cacheDir: File = app.deviceStorage.codeCacheDir) : RootCommandNoResult {
-    @Suppress("BlockingMethodInNonBlockingContext")
     override suspend fun execute() = withContext(Dispatchers.IO) {
         FileOutputStream(path, true).use { out ->
             val process = ProcessBuilder("sh").fixPath(true).start()
             process.outputStream.bufferedWriter().use { commands ->
-                // https://android.googlesource.com/platform/external/iptables/+/android-7.0.0_r1/iptables/Android.mk#34
-                val iptablesSave = if (Build.VERSION.SDK_INT < 24) File(cacheDir, "iptables-save").absolutePath.also {
-                    commands.appendLine("ln -sf /system/bin/iptables $it")
-                } else "iptables-save"
-                val ip6tablesSave = if (Build.VERSION.SDK_INT < 24) File(cacheDir, "ip6tables-save").absolutePath.also {
-                    commands.appendLine("ln -sf /system/bin/ip6tables $it")
-                } else "ip6tables-save"
                 commands.appendLine("""
                     |echo dumpsys ${Context.WIFI_P2P_SERVICE}
                     |dumpsys ${Context.WIFI_P2P_SERVICE}
@@ -49,14 +57,24 @@ data class Dump(val path: String, val cacheDir: File = app.deviceStorage.codeCac
                     |echo dumpsys ${Context.CONNECTIVITY_SERVICE} tethering
                     |dumpsys ${Context.CONNECTIVITY_SERVICE} tethering
                     |echo
+                """.trimMargin())
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val dumpCommand = if (Build.VERSION.SDK_INT >= 33) {
+                        "dumpsys ${Context.CONNECTIVITY_SERVICE} trafficcontroller"
+                    } else VpnFirewallManager.DUMP_COMMAND
+                    commands.appendLine("echo $dumpCommand\n$dumpCommand\necho")
+                    if (Build.VERSION.SDK_INT >= 31) commands.appendLine(
+                        "settings get global ${VpnFirewallManager.UIDS_ALLOWED_ON_RESTRICTED_NETWORKS}")
+                }
+                commands.appendLine("""
                     |echo iptables -t filter
-                    |$iptablesSave -t filter
+                    |iptables-save -t filter
                     |echo
                     |echo iptables -t nat
-                    |$iptablesSave -t nat
+                    |iptables-save -t nat
                     |echo
                     |echo ip6tables-save
-                    |$ip6tablesSave
+                    |ip6tables-save
                     |echo
                     |echo ip rule
                     |$IP rule
@@ -98,7 +116,8 @@ class ProcessListener(private val terminateRegex: Regex,
                       private vararg val command: String) : RootCommandChannel<ProcessData> {
     override fun create(scope: CoroutineScope) = scope.produce(Dispatchers.IO, capacity) {
         val process = ProcessBuilder(*command).start()
-        val parent = Job()  // we need to destroy process before joining, so we cannot use coroutineScope
+        // we need to destroy process before joining, so we cannot use coroutineScope
+        val parent = Job(coroutineContext.job)
         try {
             launch(parent) {
                 try {
@@ -108,7 +127,9 @@ class ProcessListener(private val terminateRegex: Regex,
                             if (terminateRegex.containsMatchIn(line)) process.destroy()
                         }
                     }
-                } catch (_: InterruptedIOException) { }
+                } catch (_: InterruptedIOException) { } catch (e: IOException) {
+                    if (!e.isEBADF) Timber.w(e)
+                }
             }
             launch(parent) {
                 try {
@@ -117,7 +138,9 @@ class ProcessListener(private val terminateRegex: Regex,
                             return@useLines
                         }.onFailure { throw it!! }
                     }
-                } catch (_: InterruptedIOException) { }
+                } catch (_: InterruptedIOException) { } catch (e: IOException) {
+                    if (!e.isEBADF) Timber.w(e)
+                }
             }
             launch(parent) {
                 trySend(ProcessData.Exit(process.waitFor())).onClosed { return@launch }.onFailure { throw it!! }
@@ -125,7 +148,7 @@ class ProcessListener(private val terminateRegex: Regex,
             parent.join()
         } finally {
             parent.cancel()
-            if (Build.VERSION.SDK_INT < 26) process.destroy() else if (process.isAlive) process.destroyForcibly()
+            if (process.isAlive) process.destroyForcibly()
             parent.join()
         }
     }
@@ -144,31 +167,51 @@ data class StartTethering(private val type: Int,
                           private val showProvisioningUi: Boolean) : RootCommand<ParcelableInt?> {
     override suspend fun execute(): ParcelableInt? {
         val future = CompletableDeferred<Int?>()
-        val callback = object : TetheringManager.StartTetheringCallback {
+        TetheringManagerCompat.startTethering(type, true, showProvisioningUi, {
+            it.run()
+        }, object : TetheringManager.StartTetheringCallback {
             override fun onTetheringStarted() {
                 future.complete(null)
             }
 
-            override fun onTetheringFailed(error: Int?) {
-                future.complete(error!!)
+            override fun onTetheringFailed(error: Int) {
+                future.complete(error)
             }
-        }
-        TetheringManager.startTethering(type, true, showProvisioningUi, {
-            GlobalScope.launch(Dispatchers.Unconfined) { it.run() }
-        }, TetheringManager.proxy(callback))
+        })
+        return future.await()?.let { ParcelableInt(it) }
+    }
+}
+
+@Parcelize
+@RequiresApi(30)
+data class StopTethering(private val cacheDir: File, private val type: Int) : RootCommand<ParcelableInt?> {
+    override suspend fun execute(): ParcelableInt? {
+        val future = CompletableDeferred<Int?>()
+        TetheringManagerCompat.stopTethering(type, object : TetheringManagerCompat.StopTetheringCallback {
+            override fun onStopTetheringSucceeded() {
+                future.complete(null)
+            }
+
+            override fun onStopTetheringFailed(error: Int) {
+                future.complete(error)
+            }
+
+            override fun onException(e: Exception) {
+                future.completeExceptionally(e)
+            }
+        }, Services.context, cacheDir)
         return future.await()?.let { ParcelableInt(it) }
     }
 }
 
 @Deprecated("Old API since API 30")
 @Parcelize
-@RequiresApi(24)
 @Suppress("DEPRECATION")
 data class StartTetheringLegacy(private val cacheDir: File, private val type: Int,
                                 private val showProvisioningUi: Boolean) : RootCommand<ParcelableBoolean> {
     override suspend fun execute(): ParcelableBoolean {
         val future = CompletableDeferred<Boolean>()
-        val callback = object : TetheringManager.StartTetheringCallback {
+        val callback = object : TetheringManagerCompat.StartTetheringCallback {
             override fun onTetheringStarted() {
                 future.complete(true)
             }
@@ -178,16 +221,15 @@ data class StartTetheringLegacy(private val cacheDir: File, private val type: In
                 future.complete(false)
             }
         }
-        TetheringManager.startTetheringLegacy(type, showProvisioningUi, callback, cacheDir = cacheDir)
+        TetheringManagerCompat.startTetheringLegacy(type, showProvisioningUi, callback, cacheDir = cacheDir)
         return ParcelableBoolean(future.await())
     }
 }
 
 @Parcelize
-@RequiresApi(24)
-data class StopTethering(private val type: Int) : RootCommandNoResult {
+data class StopTetheringLegacy(private val type: Int) : RootCommandNoResult {
     override suspend fun execute(): Parcelable? {
-        TetheringManager.stopTethering(type)
+        TetheringManagerCompat.stopTetheringLegacy(type)
         return null
     }
 }
@@ -209,7 +251,6 @@ data class SettingsGlobalPut(val name: String, val value: String) : RootCommandN
         }
     }
 
-    @Suppress("BlockingMethodInNonBlockingContext")
     override suspend fun execute() = withContext(Dispatchers.IO) {
         val process = ProcessBuilder("settings", "put", "global", name, value).fixPath(true).start()
         val error = process.inputStream.bufferedReader().readText()

@@ -5,9 +5,13 @@
     <string name="title_tethering">共享管理</string>
     <string name="title_clients">已连设备</string>
     <string name="title_settings">设置选项</string>
-    <string name="title_update">更新应用</string>
 
     <string name="repeater_channel">无线中继 (%1$d MHz, 频道 %2$d)</string>
+    <string name="repeater_features">支持的功能：</string>
+    <string name="repeater_feature_set_vendor_elements">设置供应商特定元素</string>
+    <string name="repeater_feature_group_client_removal">移除设备</string>
+    <string name="repeater_feature_pcc_mode">WPA3-SAE 兼容模式</string>
+    <string name="repeater_feature_wifi_direct_r2">WPA3-SAE</string>
     <string name="repeater_wps">WPS（不安全）</string>
     <string name="repeater_wps_dialog_title">输入 PIN</string>
     <string name="repeater_wps_dialog_pbc">一键加密</string>
@@ -57,7 +61,6 @@
       -->
     <string name="tethering_manage_usb">USB 网络共享</string>
     <string name="tethering_manage_wifi">WLAN 热点</string>
-    <string name="tethering_manage_wifi_legacy">WLAN 热点 (旧 API)</string>
     <string name="tethering_manage_bluetooth">蓝牙网络共享</string>
     <string name="tethering_manage_ethernet" msgid="959743110824197356">"以太网络共享"</string>
     <string name="tethering_manage_ncm">USB 网络共享 (NCM)</string>
@@ -80,12 +83,16 @@
     <string name="tethering_manage_wifi_feature_sta_bridged_ap_concurrency">STA/桥接 AP 并发</string>
     <string name="tethering_manage_wifi_no_features">无</string>
     <string name="tethering_manage_wifi_client_blocked">已屏蔽 %1$s：%2$s</string>
+    <string name="tethering_manage_wifi_client_disconnected">%1$s 已断开连接：%2$s</string>
     <string name="tethering_manage_wifi_copy_mac">复制 MAC</string>
+
+    <string name="tethering_static_ip">静态 IP</string>
 
     <string name="connected_state_incomplete">（正在连接）</string>
     <string name="connected_state_valid">（已连接）</string>
     <string name="connected_state_failed">（已断开）</string>
 
+    <string name="clients_empty">无设备连接</string>
     <string name="clients_popup_nickname">昵称…</string>
     <string name="clients_popup_block">拉黑</string>
     <string name="clients_popup_block_service_inactive">拉黑需要为该接口打开服务。</string>
@@ -118,6 +125,8 @@
     <string name="settings_service_repeater_safe_mode">中继安全模式</string>
     <string name="settings_service_repeater_safe_mode_summary">不对系统配置进行修改，但是可能须要较长的网络名称。</string>
     <string name="settings_service_repeater_safe_mode_warning">使用短名称可能需要关闭安全模式。</string>
+    <string name="settings_service_temp_hotspot_use_system">临时 WLAN 热点使用系统配置</string>
+    <string name="settings_service_temp_hotspot_use_system_summary">这将与其他使用本地热点的应用冲突</string>
     <string name="settings_service_wifi_lock">保持 Wi\u2011Fi 开启</string>
     <string name="settings_service_wifi_lock_none">系统默认</string>
     <string name="settings_service_wifi_lock_full">开</string>
@@ -149,7 +158,6 @@
     <string name="settings_misc_source_summary">查看使用手册，star, 提交 issues, 合作</string>
     <string name="settings_misc_donate">捐款</string>
     <string name="settings_misc_donate_summary">请给我钱</string>
-    <string name="settings_misc_donate_more">GitHub sponsors, PayPal 等其他方式…</string>
     <string name="settings_restart_required">重启应用以应用新的设置。</string>
     <string name="settings_exit_app">退出</string>
 
@@ -171,11 +179,15 @@
     <string name="exception_interface_not_found">错误：未找到下游接口</string>
     <string name="noisy_su_failure">发生异常，详情请查看调试信息。</string>
     <string name="permission_missing">权限不足</string>
+    <string name="warn_vpn_firewall">警告：共享部分 VPN 可能需要将此应用升级为系统应用或手动配置 DNS</string>
+    <string name="error_vpn_firewall_reboot">VPN 共享需要您重启您的设备</string>
 
     <string name="configuration_view">设置 WLAN</string>
+    <string name="configuration_invalid">配置可能无效</string>
     <string name="configuration_share">使用 QR 码分享</string>
     <string name="configuration_rejected">Android 系统拒绝使用此配置。（详情参见日志）</string>
     <string name="wifi_ssid" msgid="5519636102673067319">"网络名称"</string>
+    <string name="wifi_ssid_toggle_hex">切换十六进制显示</string>
     <string name="wifi_security" msgid="6603611185592956936">"安全性"</string>
     <string name="wifi_password" msgid="5948219759936151048">"密码"</string>
     <string name="wifi_hotspot_auto_off">未连接任何设备时自动关闭 WLAN 热点</string>
@@ -206,16 +218,6 @@
     <string name="wifi_ieee_80211be">启用 Wi\u2011Fi 7</string>
     <string name="wifi_user_config">用户提供配置</string>
     <string name="wifi_vendor_elements">供应商特定元素</string>
+    <string name="wifi_client_isolation">AP 隔离</string>
     <string name="wifi_save" msgid="3331121567988522826">"保存"</string>
-
-    <!-- Based on: https://github.com/PrivacyApps/donations/blob/747d36a18433c7e9329691054122a8ad337a62d2/Donations/src/main/res/values-zh/donations__strings.xml -->
-    <string name="donations__button_close">关闭</string>
-    <string name="donations__google_android_market">Google Play 商店</string>
-    <string name="donations__google_android_market_not_supported">不支持 In-App 捐赠。你的 Google Play 商店是否安装正确了呢？</string>
-    <string name="donations__google_android_market_donate_button">捐赠！</string>
-    <string name="donations__google_android_market_text">捐赠多少？</string>
-    <string name="donations__thanks_dialog">谢谢捐赠！\n非常感谢您！</string>
-
-    <string name="donations__description">觉得此应用很有用？\n捐赠给该开发者以支持此应用的开发！</string>
-    <string name="donations__google_android_market_description">Google 收取 30% 的费用</string>
 </resources>

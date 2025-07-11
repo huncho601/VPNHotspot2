@@ -5,42 +5,58 @@ import android.content.ComponentName
 import android.content.DialogInterface
 import android.content.Intent
 import android.content.ServiceConnection
+import android.net.MacAddress
 import android.net.wifi.SoftApConfiguration
 import android.net.wifi.p2p.WifiP2pGroup
+import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.Parcelable
+import android.text.SpannableStringBuilder
 import android.text.method.LinkMovementMethod
 import android.view.WindowManager
 import android.widget.EditText
 import androidx.annotation.MainThread
+import androidx.annotation.StringRes
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.ContextCompat
 import androidx.databinding.BaseObservable
 import androidx.databinding.Bindable
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withStarted
 import androidx.recyclerview.widget.RecyclerView
-import be.mygod.vpnhotspot.*
+import be.mygod.vpnhotspot.AlertDialogFragment
+import be.mygod.vpnhotspot.BR
+import be.mygod.vpnhotspot.Empty
+import be.mygod.vpnhotspot.R
+import be.mygod.vpnhotspot.RepeaterService
 import be.mygod.vpnhotspot.databinding.ListitemRepeaterBinding
-import be.mygod.vpnhotspot.net.MacAddressCompat
 import be.mygod.vpnhotspot.net.wifi.P2pSupplicantConfiguration
 import be.mygod.vpnhotspot.net.wifi.SoftApConfigurationCompat
 import be.mygod.vpnhotspot.net.wifi.WifiApDialogFragment
 import be.mygod.vpnhotspot.net.wifi.WifiApManager
+import be.mygod.vpnhotspot.net.wifi.WifiSsidCompat
 import be.mygod.vpnhotspot.util.ServiceForegroundConnector
+import be.mygod.vpnhotspot.util.Services
 import be.mygod.vpnhotspot.util.formatAddresses
 import be.mygod.vpnhotspot.util.showAllowingStateLoss
 import be.mygod.vpnhotspot.widget.SmartSnackbar
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
 import timber.log.Timber
 import java.net.NetworkInterface
 import java.net.SocketException
 
 class RepeaterManager(private val parent: TetheringFragment) : Manager(), ServiceConnection {
+    companion object {
+        private val interfaceAddress by lazy { WifiP2pGroup::class.java.getDeclaredField("interfaceAddress") }
+    }
     class ViewHolder(val binding: ListitemRepeaterBinding) : RecyclerView.ViewHolder(binding.root) {
         init {
             binding.addresses.movementMethod = LinkMovementMethod.getInstance()
@@ -65,15 +81,41 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
             }
             return parent.getString(R.string.title_repeater)
         }
-        val addresses: CharSequence @Bindable get() {
-            return try {
-                NetworkInterface.getByName(p2pInterface ?: return "")?.formatAddresses() ?: ""
-            } catch (_: SocketException) {
-                ""
-            } catch (e: Exception) {
-                Timber.w(e)
-                ""
+        val description: CharSequence @Bindable get() = SpannableStringBuilder().let { result ->
+            fun WifiP2pManager.test(@StringRes feature: Int, sdk: Int, action: (WifiP2pManager) -> Boolean) {
+                try {
+                    if (!action(this)) return
+                    result.append(if (result.isEmpty()) parent.getText(R.string.repeater_features) else ", ")
+                    result.append(parent.getText(feature))
+                } catch (e: NoSuchMethodError) {
+                    if (Build.VERSION.SDK_INT >= sdk) Timber.w(e)
+                }
             }
+            if (Build.VERSION.SDK_INT >= 30) Services.p2p?.apply {
+                test(R.string.repeater_feature_set_vendor_elements, 33) { isSetVendorElementsSupported }
+//                test(R.string.repeater_feature_channel_constrained_discovery, 33) { isChannelConstrainedDiscoverySupported }
+                test(R.string.repeater_feature_group_client_removal, 33) { isGroupClientRemovalSupported }
+//                test(R.string.repeater_feature_group_owner_ipv6_link_local_address_provided, 34) { isGroupOwnerIPv6LinkLocalAddressProvided }
+                test(R.string.repeater_feature_pcc_mode, 36) { isPccModeSupported }
+                test(R.string.repeater_feature_wifi_direct_r2, 36) { isWiFiDirectR2Supported }
+            }
+            val addresses = group?.let { group ->
+                try {
+                    NetworkInterface.getByName(group.`interface`)
+                } catch (_: SocketException) {
+                    null
+                } catch (e: Exception) {
+                    Timber.w(e)
+                    null
+                }.formatAddresses(macOverride = if (Build.VERSION.SDK_INT >= 30) try {
+                    (interfaceAddress[group] as ByteArray?)?.let(MacAddress::fromBytes)
+                } catch (e: NoSuchFieldException) {
+                    if (Build.VERSION.SDK_INT >= 34) Timber.w(e)
+                    null
+                } else null)
+            } ?: ""
+            if (addresses.isNotEmpty() && result.isNotEmpty()) result.appendLine()
+            result.append(addresses)
         }
 
         fun onStatusChanged() {
@@ -82,7 +124,7 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
             notifyPropertyChanged(BR.addresses)
         }
         fun onGroupChanged(group: WifiP2pGroup? = null) {
-            p2pInterface = group?.`interface`
+            this@RepeaterManager.group = group
             if (Build.VERSION.SDK_INT >= 29) notifyPropertyChanged(BR.title)
             notifyPropertyChanged(BR.addresses)
         }
@@ -91,7 +133,7 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
             val binder = binder
             when (binder?.service?.status) {
                 RepeaterService.Status.IDLE -> if (Build.VERSION.SDK_INT < 29) parent.requireContext().let { context ->
-                    ContextCompat.startForegroundService(context, Intent(context, RepeaterService::class.java))
+                    context.startForegroundService(Intent(context, RepeaterService::class.java))
                 } else parent.startRepeater.launch(if (Build.VERSION.SDK_INT >= 33) {
                     Manifest.permission.NEARBY_WIFI_DEVICES
                 } else Manifest.permission.ACCESS_FINE_LOCATION)
@@ -148,8 +190,10 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
     fun configure() {
         if (configuring) return
         configuring = true
-        parent.viewLifecycleOwner.lifecycleScope.launchWhenCreated {
-            getConfiguration()?.let { (config, readOnly) ->
+        val owner = parent.viewLifecycleOwner
+        owner.lifecycleScope.launch {
+            val (config, readOnly) = getConfiguration() ?: return@launch
+            owner.withStarted {
                 WifiApDialogFragment().apply {
                     arg(WifiApDialogFragment.Arg(config, readOnly, true))
                     key(this@RepeaterManager.javaClass.name)
@@ -162,7 +206,7 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
     override val type get() = VIEW_TYPE_REPEATER
     private val data = Data()
     internal var binder: RepeaterService.Binder? = null
-    private var p2pInterface: String? = null
+    private var group: WifiP2pGroup? = null
     private val holder by parent.viewModels<ConfigHolder>()
 
     override fun bindTo(viewHolder: RecyclerView.ViewHolder) {
@@ -193,7 +237,7 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
                 return SoftApConfigurationCompat(
                     ssid = networkName,
                     passphrase = passphrase,
-                    securityType = SoftApConfiguration.SECURITY_TYPE_WPA2_PSK,  // is not actually used
+                    securityType = RepeaterService.securityType,
                     isAutoShutdownEnabled = RepeaterService.isAutoShutdownEnabled,
                     shutdownTimeoutMillis = RepeaterService.shutdownTimeoutMillis,
                     macRandomizationSetting = if (WifiApManager.p2pMacRandomizationSupported) {
@@ -208,8 +252,12 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
         } else binder?.let { binder ->
             val group = binder.group ?: binder.fetchPersistentGroup().let { binder.group }
             if (group != null) return SoftApConfigurationCompat(
-                ssid = group.networkName,
-                securityType = SoftApConfiguration.SECURITY_TYPE_WPA2_PSK,  // is not actually used
+                ssid = WifiSsidCompat.fromUtf8Text(group.networkName),
+                securityType = if (Build.VERSION.SDK_INT >= 36) when (group.securityType) {
+                    WifiP2pGroup.SECURITY_TYPE_WPA3_COMPATIBILITY -> SoftApConfiguration.SECURITY_TYPE_WPA3_SAE_TRANSITION
+                    WifiP2pGroup.SECURITY_TYPE_WPA3_SAE -> SoftApConfiguration.SECURITY_TYPE_WPA3_SAE
+                    else -> SoftApConfiguration.SECURITY_TYPE_WPA2_PSK
+                } else SoftApConfiguration.SECURITY_TYPE_WPA2_PSK,
                 isAutoShutdownEnabled = RepeaterService.isAutoShutdownEnabled,
                 shutdownTimeoutMillis = RepeaterService.shutdownTimeoutMillis,
                 macRandomizationSetting = if (WifiApManager.p2pMacRandomizationSupported) {
@@ -226,10 +274,11 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
                     bssid = config.bssid
                     this to false
                 } catch (e: Exception) {
-                    if (e !is CancellationException) Timber.w(e)
+                    if (e is P2pSupplicantConfiguration.LoggedException) Timber.d(e)
+                    else if (e !is CancellationException) Timber.w(e)
                     passphrase = group.passphrase
                     try {
-                        bssid = group.owner?.deviceAddress?.let(MacAddressCompat.Companion::fromString)
+                        bssid = group.owner?.deviceAddress?.let(MacAddress::fromString)
                     } catch (_: IllegalArgumentException) { }
                     this to true
                 }
@@ -244,10 +293,15 @@ class RepeaterManager(private val parent: TetheringFragment) : Manager(), Servic
             RepeaterService.networkName = config.ssid
             RepeaterService.deviceAddress = config.bssid
             RepeaterService.passphrase = config.passphrase
+            RepeaterService.securityType = config.securityType
         } else holder.config?.let { master ->
             val binder = binder
-            if (binder?.group?.networkName != config.ssid || master.psk != config.passphrase ||
-                    master.bssid != config.bssid) try {
+            val mayBeModified = master.psk != config.passphrase || master.bssid != config.bssid || config.ssid.run {
+                if (this != null) decode().let {
+                    it == null || binder?.group?.networkName != it
+                } else binder?.group?.networkName != null
+            }
+            if (mayBeModified) try {
                 withContext(Dispatchers.Default) { master.update(config.ssid!!, config.passphrase!!, config.bssid) }
                 (this.binder ?: binder)?.group = null
             } catch (e: Exception) {

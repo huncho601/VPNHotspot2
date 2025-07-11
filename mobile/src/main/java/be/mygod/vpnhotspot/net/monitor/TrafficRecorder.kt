@@ -1,9 +1,9 @@
 package be.mygod.vpnhotspot.net.monitor
 
+import android.net.MacAddress
 import androidx.collection.LongSparseArray
 import androidx.collection.set
 import be.mygod.vpnhotspot.net.IpDev
-import be.mygod.vpnhotspot.net.MacAddressCompat
 import be.mygod.vpnhotspot.net.Routing.Companion.IPTABLES
 import be.mygod.vpnhotspot.room.AppDatabase
 import be.mygod.vpnhotspot.room.TrafficRecord
@@ -11,20 +11,26 @@ import be.mygod.vpnhotspot.util.Event2
 import be.mygod.vpnhotspot.util.RootSession
 import be.mygod.vpnhotspot.util.parseNumericAddress
 import be.mygod.vpnhotspot.widget.SmartSnackbar
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 object TrafficRecorder {
     private const val ANYWHERE = "0.0.0.0/0"
+    private const val FOREGROUND_POLL_MS = 1015L
 
     private var lastUpdate = 0L
     private val records = mutableMapOf<IpDev, TrafficRecord>()
     val foregroundListeners = Event2<Collection<TrafficRecord>, LongSparseArray<TrafficRecord>>()
 
-    fun register(ip: InetAddress, downstream: String, mac: MacAddressCompat) {
-        val record = TrafficRecord(mac = mac.addr, ip = ip, downstream = downstream)
+    fun register(ip: InetAddress, downstream: String, mac: MacAddress) {
+        val record = TrafficRecord(mac = mac, ip = ip, downstream = downstream)
         AppDatabase.instance.trafficRecordDao.insert(record)
         synchronized(this) {
             val key = IpDev(ip, downstream)
@@ -50,7 +56,7 @@ object TrafficRecorder {
         val now = System.currentTimeMillis()
         val minute = TimeUnit.MINUTES.toMillis(1)
         var timeout = minute - now % minute
-        if (foregroundListeners.isNotEmpty() && timeout > 1000) timeout = 1000
+        if (foregroundListeners.isNotEmpty() && timeout > FOREGROUND_POLL_MS) timeout = FOREGROUND_POLL_MS
         updateJob = GlobalScope.launch(start = CoroutineStart.UNDISPATCHED) {
             delay(timeout)
             update(true)
@@ -156,5 +162,5 @@ object TrafficRecorder {
     /**
      * Possibly inefficient. Don't call this too often.
      */
-    fun isWorking(mac: MacAddressCompat) = records.values.any { it.mac == mac.addr }
+    fun isWorking(mac: MacAddress) = records.values.any { it.mac == mac }
 }

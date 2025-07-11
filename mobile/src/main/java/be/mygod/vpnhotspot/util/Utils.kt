@@ -1,21 +1,33 @@
 package be.mygod.vpnhotspot.util
 
 import android.annotation.SuppressLint
-import android.annotation.TargetApi
-import android.content.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.content.res.Resources
-import android.net.*
+import android.net.InetAddresses
+import android.net.LinkProperties
+import android.net.MacAddress
+import android.net.NetworkRequest
+import android.net.RouteInfo
+import android.net.http.ConnectionMigrationOptions
+import android.net.http.HttpEngine
 import android.os.Build
 import android.os.RemoteException
-import android.system.ErrnoException
-import android.system.Os
-import android.system.OsConstants
-import android.text.*
+import android.os.ext.SdkExtensions
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.view.MenuItem
 import android.view.View
 import android.widget.ImageView
 import androidx.annotation.DrawableRes
-import androidx.annotation.RequiresApi
+import androidx.annotation.RequiresExtension
+import androidx.core.i18n.DateTimeFormatter
+import androidx.core.i18n.DateTimeFormatterSkeletonOptions
 import androidx.core.net.toUri
 import androidx.core.view.isVisible
 import androidx.databinding.BindingAdapter
@@ -25,12 +37,12 @@ import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.net.MacAddressCompat
 import be.mygod.vpnhotspot.widget.SmartSnackbar
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.job
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
-import java.io.FileNotFoundException
-import java.io.IOException
 import java.lang.invoke.MethodHandles
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
@@ -39,7 +51,9 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.SocketException
-import java.util.*
+import java.net.URL
+import java.util.Locale
+import java.util.concurrent.Executor
 
 tailrec fun Throwable.getRootCause(): Throwable {
     if (this is InvocationTargetException || this is RemoteException) return (cause ?: return this).getRootCause()
@@ -57,28 +71,28 @@ fun Long.toPluralInt(): Int {
     return (this % 1000000000).toInt() + 1000000000
 }
 
-@RequiresApi(26)
 fun Method.matches(name: String, vararg classes: Class<*>) = this.name == name && parameterCount == classes.size &&
         classes.indices.all { i -> parameters[i].type == classes[i] }
-@RequiresApi(26)
 inline fun <reified T> Method.matches1(name: String) = matches(name, T::class.java)
-
-fun Method.matchesCompat(name: String, args: Array<out Any?>?, vararg classes: Class<*>) =
-    if (Build.VERSION.SDK_INT < 26) {
-        this.name == name && args?.size ?: 0 == classes.size && classes.indices.all { i ->
-            args!![i]?.let { classes[i].isInstance(it) } != false
-        }
-    } else matches(name, *classes)
-
-fun HttpURLConnection.disconnectCompat() {
-    if (Build.VERSION.SDK_INT < 26) GlobalScope.launch(Dispatchers.IO) { disconnect() } else disconnect()
-}
 
 fun Context.ensureReceiverUnregistered(receiver: BroadcastReceiver) {
     try {
         unregisterReceiver(receiver)
     } catch (_: IllegalArgumentException) { }
 }
+
+private val dateTimeFormat = DateTimeFormatterSkeletonOptions.Builder(
+    year = DateTimeFormatterSkeletonOptions.Year.NUMERIC,
+    month = DateTimeFormatterSkeletonOptions.Month.NUMERIC,
+    day = DateTimeFormatterSkeletonOptions.Day.NUMERIC,
+    period = DateTimeFormatterSkeletonOptions.Period.ABBREVIATED,
+    hour = DateTimeFormatterSkeletonOptions.Hour.NUMERIC,
+    minute = DateTimeFormatterSkeletonOptions.Minute.NUMERIC,
+    second = DateTimeFormatterSkeletonOptions.Second.NUMERIC,
+    fractionalSecond = DateTimeFormatterSkeletonOptions.FractionalSecond.NUMERIC_3_DIGITS,
+).build()
+fun Context.formatTimestamp(timestamp: Long) = DateTimeFormatter(this, dateTimeFormat,
+    resources.configuration.locales[0]).format(timestamp)
 
 fun DialogFragment.showAllowingStateLoss(manager: FragmentManager, tag: String? = null) {
     if (!manager.isStateSaved) show(manager, tag)
@@ -162,19 +176,32 @@ fun makeIpSpan(ip: InetAddress) = ip.hostAddress.let {
     }
 }
 fun makeMacSpan(mac: String) = if (app.hasTouch) SpannableString(mac).apply {
-    setSpan(CustomTabsUrlSpan("https://macvendors.co/results/$mac"), 0, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+    setSpan(CustomTabsUrlSpan("https://macaddress.io/macaddress/$mac"), 0, length,
+        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
 } else mac
 
-fun NetworkInterface.formatAddresses(macOnly: Boolean = false) = SpannableStringBuilder().apply {
-    try {
-        val address = hardwareAddress?.let(MacAddressCompat::fromBytes)
-        if (address != null && address != MacAddressCompat.ANY_ADDRESS) appendLine(makeMacSpan(address.toString()))
-    } catch (e: IllegalArgumentException) {
-        Timber.w(e)
+fun NetworkInterface?.formatAddresses(macOnly: Boolean = false,
+                                      macOverride: MacAddress? = null) = SpannableStringBuilder().apply {
+    var address = macOverride
+    if (address == null && this@formatAddresses != null) try {
+        val hardwareAddress = hardwareAddress
+        address = try {
+            hardwareAddress?.let(MacAddress::fromBytes)
+        } catch (e: IllegalArgumentException) {
+            try {
+                hardwareAddress?.let { MacAddress.fromString(String(it)) }.also { Timber.d(e) }
+            } catch (e2: IllegalArgumentException) {
+                e.addSuppressed(e2)
+                Timber.w(e)
+                null
+            }
+        }
     } catch (_: SocketException) { }
-    if (!macOnly) for (address in interfaceAddresses) {
+    if (address != null && address != MacAddressCompat.ANY_ADDRESS) appendLine(makeMacSpan(address.toString()))
+    if (!macOnly && this@formatAddresses != null) for (address in interfaceAddresses) {
         append(makeIpSpan(address.address))
-        appendLine("/${address.networkPrefixLength}")
+        address.networkPrefixLength.also { if (it.toInt() != address.address.address.size * 8) append("/$it") }
+        appendLine()
     }
 }.trimEnd()
 
@@ -189,10 +216,10 @@ fun parseNumericAddress(address: String) = if (Build.VERSION.SDK_INT >= 29) {
 
 private val getAllInterfaceNames by lazy { LinkProperties::class.java.getDeclaredMethod("getAllInterfaceNames") }
 @Suppress("UNCHECKED_CAST")
-val LinkProperties.allInterfaceNames get() = getAllInterfaceNames.invoke(this) as List<String>
+val LinkProperties.allInterfaceNames get() = getAllInterfaceNames(this) as List<String>
 private val getAllRoutes by lazy { LinkProperties::class.java.getDeclaredMethod("getAllRoutes") }
 @Suppress("UNCHECKED_CAST")
-val LinkProperties.allRoutes get() = getAllRoutes.invoke(this) as List<RouteInfo>
+val LinkProperties.allRoutes get() = getAllRoutes(this) as List<RouteInfo>
 
 fun Context.launchUrl(url: String) {
     if (app.hasTouch) try {
@@ -219,12 +246,17 @@ fun Resources.findIdentifier(name: String, defType: String, defPackage: String, 
         if (alternativePackage != null && it == 0) getIdentifier(name, defType, alternativePackage) else it
     }
 
-@get:RequiresApi(26)
-private val newLookup by lazy @TargetApi(26) {
+private val newLookup by lazy {
     MethodHandles.Lookup::class.java.getDeclaredConstructor(Class::class.java, Int::class.java).apply {
         isAccessible = true
     }
 }
+fun Class<*>.privateLookup() = if (Build.VERSION.SDK_INT < 33) try {
+    newLookup.newInstance(this, 0xf)    // ALL_MODES
+} catch (e: ReflectiveOperationException) {
+    Timber.w(e)
+    MethodHandles.lookup().`in`(this)
+} else MethodHandles.privateLookupIn(this, null)
 
 /**
  * Call interface super method.
@@ -232,12 +264,7 @@ private val newLookup by lazy @TargetApi(26) {
  * See also: https://stackoverflow.com/a/49532463/2245107
  */
 fun InvocationHandler.callSuper(interfaceClass: Class<*>, proxy: Any, method: Method, args: Array<out Any?>?) = when {
-    Build.VERSION.SDK_INT >= 26 && method.isDefault -> try {
-        newLookup.newInstance(interfaceClass, 0xf)   // ALL_MODES
-    } catch (e: ReflectiveOperationException) {
-        Timber.w(e)
-        MethodHandles.lookup().`in`(interfaceClass)
-    }.unreflectSpecial(method, interfaceClass).bindTo(proxy).run {
+    method.isDefault -> interfaceClass.privateLookup().unreflectSpecial(method, interfaceClass).bindTo(proxy).run {
         if (args == null) invokeWithArguments() else invokeWithArguments(*args)
     }
     // otherwise, we just redispatch it to InvocationHandler
@@ -258,20 +285,45 @@ fun InvocationHandler.callSuper(interfaceClass: Class<*>, proxy: Any, method: Me
 }
 
 fun globalNetworkRequestBuilder() = NetworkRequest.Builder().apply {
-    if (Build.VERSION.SDK_INT >= 31) setIncludeOtherUidNetworks(true) else if (Build.VERSION.SDK_INT == 23) {
-        // workarounds for OEM bugs
-        removeCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        removeCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)
+    if (Build.VERSION.SDK_INT >= 31) setIncludeOtherUidNetworks(true)
+}
+
+@get:RequiresExtension(Build.VERSION_CODES.S, 7)
+private val engine by lazy @RequiresExtension(Build.VERSION_CODES.S, 7) {
+    val cache = File(app.deviceStorage.cacheDir, "httpEngine")
+    HttpEngine.Builder(app.deviceStorage).apply {
+        if (cache.mkdirs() || cache.isDirectory) {
+            setStoragePath(cache.absolutePath)
+            setEnableHttpCache(HttpEngine.Builder.HTTP_CACHE_DISK, 1024 * 1024)
+        }
+        setConnectionMigrationOptions(ConnectionMigrationOptions.Builder().apply {
+            setDefaultNetworkMigration(ConnectionMigrationOptions.MIGRATION_OPTION_ENABLED)
+            setPathDegradationMigration(ConnectionMigrationOptions.MIGRATION_OPTION_ENABLED)
+        }.build())
+        setEnableBrotli(true)
+        addQuicHint("macaddress.io", 443, 443)
+    }.build()
+}
+suspend fun <T> connectCancellable(url: String, block: suspend (HttpURLConnection) -> T): T {
+    val conn = (if (Build.VERSION.SDK_INT >= 34 || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7) {
+        engine.openConnection(URL(url))
+    } else @Suppress("BlockingMethodInNonBlockingContext") URL(url).openConnection()) as HttpURLConnection
+    return coroutineScope {
+        @OptIn(InternalCoroutinesApi::class)    // https://github.com/Kotlin/kotlinx.coroutines/issues/4117
+        coroutineContext.job.invokeOnCompletion(true) { conn.disconnect() }
+        try {
+            withContext(Dispatchers.IO) { block(conn) }
+        } finally {
+            conn.disconnect()
+        }
     }
 }
 
-@Suppress("FunctionName")
-fun if_nametoindex(ifname: String) = if (Build.VERSION.SDK_INT >= 26) {
-    Os.if_nametoindex(ifname)
-} else try {
-    File("/sys/class/net/$ifname/ifindex").inputStream().bufferedReader().use { it.readLine().trim().toInt() }
-} catch (_: FileNotFoundException) {
-    NetworkInterface.getByName(ifname)?.index ?: 0
-} catch (e: IOException) {
-    if ((e.cause as? ErrnoException)?.errno == OsConstants.ENODEV) 0 else throw e
+object InPlaceExecutor : Executor {
+    override fun execute(command: Runnable) = try {
+        command.run()
+    } catch (e: Exception) {
+        Timber.w(e) // prevent Binder stub swallowing the exception
+    }
 }

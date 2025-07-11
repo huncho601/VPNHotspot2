@@ -1,10 +1,12 @@
 package be.mygod.vpnhotspot.net.wifi
 
+import android.net.MacAddress
 import android.net.wifi.p2p.WifiP2pGroup
 import be.mygod.vpnhotspot.RepeaterService
 import be.mygod.vpnhotspot.net.MacAddressCompat
 import be.mygod.vpnhotspot.root.RepeaterCommands
 import be.mygod.vpnhotspot.root.RootManager
+import com.google.firebase.crashlytics.CustomKeysAndValues
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 
 /**
@@ -14,11 +16,12 @@ import com.google.firebase.crashlytics.FirebaseCrashlytics
  */
 class P2pSupplicantConfiguration(private val group: WifiP2pGroup? = null) {
     companion object {
-        private const val TAG = "P2pSupplicantConfiguration"
         private const val PERSISTENT_MAC = "p2p_device_persistent_mac_addr="
         private val networkParser =
                 "^(bssid=(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})|psk=(ext:|\"(.*)\"|[0-9a-fA-F]{64}\$)?)".toRegex()
     }
+
+    class LoggedException(cause: Exception) : Exception(cause)
 
     private class NetworkBlock : ArrayList<String>() {
         var ssidLine: Int? = null
@@ -53,8 +56,8 @@ class P2pSupplicantConfiguration(private val group: WifiP2pGroup? = null) {
             var bssids = listOfNotNull(group?.owner?.deviceAddress, ownerAddress)
                     .distinct()
                     .filter {
+                        val mac = MacAddress.fromString(it)
                         try {
-                            val mac = MacAddressCompat.fromString(it)
                             mac != MacAddressCompat.ALL_ZEROS_ADDRESS && mac != MacAddressCompat.ANY_ADDRESS
                         } catch (_: IllegalArgumentException) {
                             false
@@ -126,28 +129,27 @@ class P2pSupplicantConfiguration(private val group: WifiP2pGroup? = null) {
                     add("\tmode=3")
                     add("\tdisabled=2")
                     add("}")
-                    if (target == null) target = this
+                    target = this
                 })
             }
             content = Content(result, target!!, persistentMacLine, legacy)
         } catch (e: Exception) {
-            FirebaseCrashlytics.getInstance().apply {
-                setCustomKey(TAG, config)
-                setCustomKey("$TAG.ownerAddress", ownerAddress.toString())
-                setCustomKey("$TAG.p2pGroup", group.toString())
-            }
-            throw e
+            FirebaseCrashlytics.getInstance().recordException(e, CustomKeysAndValues.Builder().apply {
+                putString("config", config)
+                ownerAddress?.let { putString("ownerAddress", it) }
+                putString("p2pGroup", group.toString())
+            }.build())
+            throw LoggedException(e)
         }
     }
     val psk by lazy { group?.passphrase ?: content.target.psk!! }
     val bssid by lazy {
-        content.target.bssid?.let { MacAddressCompat.fromString(it) }
+        content.target.bssid?.let { MacAddress.fromString(it) }
     }
 
-    suspend fun update(ssid: String, psk: String, bssid: MacAddressCompat?) {
+    suspend fun update(ssid: WifiSsidCompat, psk: String, bssid: MacAddress?) {
         val (lines, block, persistentMacLine, legacy) = content
-        block[block.ssidLine!!] = "\tssid=" + ssid.toByteArray()
-                .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
+        block[block.ssidLine!!] = "\tssid=${ssid.hex}"
         block[block.pskLine!!] = "\tpsk=\"$psk\""   // no control chars or weird stuff
         if (bssid != null) {
             persistentMacLine?.let { lines[it] = PERSISTENT_MAC + bssid }

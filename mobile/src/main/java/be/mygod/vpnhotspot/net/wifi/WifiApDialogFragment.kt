@@ -1,11 +1,12 @@
 package be.mygod.vpnhotspot.net.wifi
 
 import android.annotation.SuppressLint
-import android.annotation.TargetApi
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.DialogInterface
+import android.net.MacAddress
 import android.net.wifi.SoftApConfiguration
+import android.net.wifi.p2p.WifiP2pConfig
 import android.os.Build
 import android.os.Parcelable
 import android.text.Editable
@@ -31,12 +32,13 @@ import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.R
 import be.mygod.vpnhotspot.RepeaterService
 import be.mygod.vpnhotspot.databinding.DialogWifiApBinding
-import be.mygod.vpnhotspot.net.MacAddressCompat
 import be.mygod.vpnhotspot.net.monitor.TetherTimeoutMonitor
 import be.mygod.vpnhotspot.util.QRCodeDialog
 import be.mygod.vpnhotspot.util.RangeInput
+import be.mygod.vpnhotspot.util.Services
 import be.mygod.vpnhotspot.util.readableMessage
 import be.mygod.vpnhotspot.util.showAllowingStateLoss
+import com.google.android.material.textfield.TextInputLayout
 import kotlinx.parcelize.Parcelize
 import timber.log.Timber
 import java.text.DecimalFormat
@@ -53,9 +55,12 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
     companion object {
         private const val BASE64_FLAGS = Base64.NO_PADDING or Base64.NO_WRAP
         private val nonMacChars = "[^0-9a-fA-F:]+".toRegex()
-        private val channels2G = (1..14).map { ChannelOption(SoftApConfigurationCompat.BAND_2GHZ, it) }
-        private val channels5G by lazy {
-            channels2G + (1..196).map { ChannelOption(SoftApConfigurationCompat.BAND_5GHZ, it) }
+        private val channels2G = (1..14).map { ChannelOption(SoftApConfiguration.BAND_2GHZ, it) }
+        private val channels6G by lazy {
+            val c5g = channels2G + (1..196).map { ChannelOption(SoftApConfiguration.BAND_5GHZ, it) }
+            if (Build.VERSION.SDK_INT >= 30) {
+                c5g + (1..253).map { ChannelOption(SoftApConfiguration.BAND_6GHZ, it) }
+            } else c5g
         }
 
         private fun genAutoOptions(band: Int) = (1..band).filter { it and band == it }.map { ChannelOption(it) }
@@ -64,21 +69,21 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
          */
         private val p2pUnsafeOptions by lazy {
             listOf(ChannelOption(SoftApConfigurationCompat.BAND_LEGACY)) +
-                    channels2G + (15..165).map { ChannelOption(SoftApConfigurationCompat.BAND_5GHZ, it) }
+                    channels2G + (15..165).map { ChannelOption(SoftApConfiguration.BAND_5GHZ, it) }
         }
-        private val p2pSafeOptions by lazy { genAutoOptions(SoftApConfigurationCompat.BAND_LEGACY) + channels5G }
+        private val p2pSafeOptions by lazy {
+            (if (Build.VERSION.SDK_INT >= 36) listOf(
+                ChannelOption(SoftApConfigurationCompat.BAND_ANY_30),
+                ChannelOption(SoftApConfiguration.BAND_2GHZ),
+                ChannelOption(SoftApConfiguration.BAND_5GHZ),
+                ChannelOption(SoftApConfiguration.BAND_6GHZ),
+            ) else genAutoOptions(SoftApConfigurationCompat.BAND_LEGACY)) + channels6G
+        }
         private val softApOptions by lazy {
-            when (Build.VERSION.SDK_INT) {
-                in 30..Int.MAX_VALUE -> {
-                    genAutoOptions(SoftApConfigurationCompat.BAND_ANY_31) +
-                            channels5G +
-                            (1..253).map { ChannelOption(SoftApConfigurationCompat.BAND_6GHZ, it) } +
-                            (1..6).map { ChannelOption(SoftApConfigurationCompat.BAND_60GHZ, it) }
-                }
-                in 28 until 30 -> p2pSafeOptions
-                else -> listOf(ChannelOption(SoftApConfigurationCompat.BAND_2GHZ),
-                    ChannelOption(SoftApConfigurationCompat.BAND_5GHZ)) + channels5G
-            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                genAutoOptions(SoftApConfigurationCompat.BAND_ANY_31) + channels6G +
+                        (1..6).map { ChannelOption(SoftApConfiguration.BAND_60GHZ, it) }
+            } else p2pSafeOptions
         }
 
         @get:RequiresApi(30)
@@ -87,6 +92,8 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
                 Array(lookup.size()) { BandWidth(lookup.keyAt(it), lookup.valueAt(it).substring(14)) }.apply { sort() }
             }
         }
+        @get:RequiresApi(36)
+        private val p2pSecurityTypes = arrayOf("WPA2-Personal", "WPA3-Personal Compatibility Mode", "WPA3-Personal")
     }
 
     @Parcelize
@@ -103,12 +110,12 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
             override fun toString() = app.getString(R.string.wifi_ap_choose_disabled)
         }
         override fun toString() = if (channel == 0) {
-            val format = DecimalFormat("#.#", DecimalFormatSymbols.getInstance(app.resources.configuration.locale))
+            val format = DecimalFormat("#.#", DecimalFormatSymbols.getInstance(app.resources.configuration.locales[0]))
             app.getString(R.string.wifi_ap_choose_G, arrayOf(
-                SoftApConfigurationCompat.BAND_2GHZ to 2.4,
-                SoftApConfigurationCompat.BAND_5GHZ to 5,
-                SoftApConfigurationCompat.BAND_6GHZ to 6,
-                SoftApConfigurationCompat.BAND_60GHZ to 60,
+                SoftApConfiguration.BAND_2GHZ to 2.4,
+                SoftApConfiguration.BAND_5GHZ to 5,
+                SoftApConfiguration.BAND_6GHZ to 6,
+                SoftApConfiguration.BAND_60GHZ to 60,
             ).filter { (mask, _) -> band and mask == mask }.joinToString("/") { (_, name) -> format.format(name) })
         } else "${SoftApConfigurationCompat.channelToFrequency(band, channel)} MHz ($channel)"
     }
@@ -129,12 +136,21 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
     }
     private val acsList by lazy {
         listOf(
-            Triple(SoftApConfigurationCompat.BAND_2GHZ, dialogView.acs2g, dialogView.acs2gWrapper),
-            Triple(SoftApConfigurationCompat.BAND_5GHZ, dialogView.acs5g, dialogView.acs5gWrapper),
-            Triple(SoftApConfigurationCompat.BAND_6GHZ, dialogView.acs6g, dialogView.acs6gWrapper),
+            Triple(SoftApConfiguration.BAND_2GHZ, dialogView.acs2g, dialogView.acs2gWrapper),
+            Triple(SoftApConfiguration.BAND_5GHZ, dialogView.acs5g, dialogView.acs5gWrapper),
+            Triple(SoftApConfiguration.BAND_6GHZ, dialogView.acs6g, dialogView.acs6gWrapper),
         )
     }
     override val ret get() = Arg(generateConfig())
+    private val hexToggleable get() = if (arg.p2pMode) !RepeaterService.safeMode else Build.VERSION.SDK_INT >= 33
+    private var hexSsid = false
+        set(value) {
+            field = value
+            dialogView.ssidWrapper.setEndIconActivated(value)
+        }
+    private val ssid get() = if (hexSsid) {
+        WifiSsidCompat.fromHex(dialogView.ssid.text?.toString())
+    } else WifiSsidCompat.fromUtf8Text(dialogView.ssid.text?.toString())
 
     private fun generateChannels() = SparseIntArray(2).apply {
         if (!arg.p2pMode && Build.VERSION.SDK_INT >= 31) {
@@ -143,30 +159,32 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         (dialogView.bandPrimary.selectedItem as ChannelOption).apply { put(band, channel) }
     }
     private fun generateConfig(full: Boolean = true) = base.copy(
-            ssid = dialogView.ssid.text.toString(),
+            ssid = ssid,
             passphrase = if (dialogView.password.length() != 0) dialogView.password.text.toString() else null).apply {
         if (!arg.p2pMode) {
             securityType = dialogView.security.selectedItemPosition
             isHiddenSsid = dialogView.hiddenSsid.isChecked
+        } else if (Build.VERSION.SDK_INT >= 36) {
+            securityType = dialogView.security.selectedItemPosition + SoftApConfiguration.SECURITY_TYPE_WPA2_PSK
         }
-        if (full) @TargetApi(28) {
+        if (full) {
             isAutoShutdownEnabled = dialogView.autoShutdown.isChecked
             shutdownTimeoutMillis = dialogView.timeout.text.let { text ->
                 if (text.isNullOrEmpty()) 0 else text.toString().toLong()
             }
-            if (Build.VERSION.SDK_INT >= 23 || arg.p2pMode) channels = generateChannels()
+            channels = generateChannels()
             maxNumberOfClients = dialogView.maxClient.text.let { text ->
                 if (text.isNullOrEmpty()) 0 else text.toString().toInt()
             }
             isClientControlByUserEnabled = dialogView.clientUserControl.isChecked
             allowedClientList = (dialogView.allowedList.text ?: "").split(nonMacChars)
-                    .filter { it.isNotEmpty() }.map { MacAddressCompat.fromString(it).toPlatform() }
+                    .filter { it.isNotEmpty() }.map(MacAddress::fromString)
             blockedClientList = (dialogView.blockedList.text ?: "").split(nonMacChars)
-                    .filter { it.isNotEmpty() }.map { MacAddressCompat.fromString(it).toPlatform() }
+                    .filter { it.isNotEmpty() }.map(MacAddress::fromString)
             macRandomizationSetting = dialogView.macRandomization.selectedItemPosition
             bssid = if ((arg.p2pMode || Build.VERSION.SDK_INT < 31 && macRandomizationSetting ==
                         SoftApConfigurationCompat.RANDOMIZATION_NONE) && dialogView.bssid.length() != 0) {
-                MacAddressCompat.fromString(dialogView.bssid.text.toString())
+                MacAddress.fromString(dialogView.bssid.text.toString())
             } else null
             isBridgedModeOpportunisticShutdownEnabled = dialogView.bridgedModeOpportunisticShutdown.isChecked
             isIeee80211axEnabled = dialogView.ieee80211ax.isChecked
@@ -177,12 +195,12 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
             }
             vendorElements = VendorElements.deserialize(dialogView.vendorElements.text)
             persistentRandomizedMacAddress = if (dialogView.persistentRandomizedMac.length() != 0) {
-                MacAddressCompat.fromString(dialogView.persistentRandomizedMac.text.toString()).toPlatform()
+                MacAddress.fromString(dialogView.persistentRandomizedMac.text.toString())
             } else null
             allowedAcsChannels = acsList.associate { (band, text, _) -> band to RangeInput.fromString(text.text) }
-            if (!arg.p2pMode && Build.VERSION.SDK_INT >= 33) {
-                maxChannelBandwidth = (dialogView.maxChannelBandwidth.selectedItem as BandWidth).width
-            }
+            if (arg.p2pMode || Build.VERSION.SDK_INT < 33) return@apply
+            maxChannelBandwidth = (dialogView.maxChannelBandwidth.selectedItem as BandWidth).width
+            if (Build.VERSION.SDK_INT >= 36) isClientIsolationEnabled = dialogView.clientIsolation.isChecked
         }
     }
 
@@ -192,66 +210,108 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         dialogView = DialogWifiApBinding.inflate(activity.layoutInflater)
         setView(dialogView.root)
         if (!arg.readOnly) setPositiveButton(R.string.wifi_save, listener)
-        setNegativeButton(R.string.donations__button_close, null)
         dialogView.toolbar.inflateMenu(R.menu.toolbar_configuration)
         dialogView.toolbar.setOnMenuItemClickListener(this@WifiApDialogFragment)
-        dialogView.ssidWrapper.setLengthCounter { it.toString().toByteArray().size }
-        if (!arg.readOnly) dialogView.ssid.addTextChangedListener(this@WifiApDialogFragment)
-        if (arg.p2pMode) dialogView.securityWrapper.isGone = true else dialogView.security.apply {
+        dialogView.ssidWrapper.setLengthCounter {
+            try {
+                ssid?.bytes?.size ?: 0
+            } catch (_: IllegalArgumentException) {
+                0
+            }
+        }
+        if (hexToggleable) dialogView.ssidWrapper.apply {
+            endIconMode = TextInputLayout.END_ICON_CUSTOM
+            setEndIconOnClickListener {
+                val ssid = try {
+                    ssid
+                } catch (_: IllegalArgumentException) {
+                    return@setEndIconOnClickListener
+                }
+                val newText = if (hexSsid) ssid?.run {
+                    decode().also { if (it == null) return@setEndIconOnClickListener }
+                } else ssid?.hex
+                hexSsid = !hexSsid
+                dialogView.ssid.setText(newText)
+            }
+            findViewById<View>(com.google.android.material.R.id.text_input_end_icon).apply {
+                tooltipText = contentDescription
+            }
+        }
+        dialogView.ssid.addTextChangedListener(this@WifiApDialogFragment)
+        if (!arg.p2pMode) dialogView.security.apply {
             adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, 0,
-                    SoftApConfigurationCompat.securityTypes).apply {
+                SoftApConfigurationCompat.securityTypes).apply {
                 setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
             }
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent: AdapterView<*>?) = error("Must select something")
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     when (position) {
-                         SoftApConfiguration.SECURITY_TYPE_OPEN,
-                         SoftApConfiguration.SECURITY_TYPE_WPA3_OWE_TRANSITION,
-                         SoftApConfiguration.SECURITY_TYPE_WPA3_OWE -> dialogView.passwordWrapper.isGone = true
-                         else -> {
+                        SoftApConfiguration.SECURITY_TYPE_OPEN,
+                        SoftApConfiguration.SECURITY_TYPE_WPA3_OWE_TRANSITION,
+                        SoftApConfiguration.SECURITY_TYPE_WPA3_OWE -> dialogView.passwordWrapper.isGone = true
+                        SoftApConfiguration.SECURITY_TYPE_WPA3_SAE -> {
                             dialogView.passwordWrapper.isGone = false
-                            if (position == SoftApConfiguration.SECURITY_TYPE_WPA3_SAE) {
-                                dialogView.passwordWrapper.isCounterEnabled = false
-                                dialogView.passwordWrapper.counterMaxLength = 0
-                                dialogView.password.filters = emptyArray()
-                            } else {
-                                dialogView.passwordWrapper.isCounterEnabled = true
-                                dialogView.passwordWrapper.counterMaxLength = 63
-                                dialogView.password.filters = arrayOf(InputFilter.LengthFilter(63))
-                            }
+                            dialogView.passwordWrapper.isCounterEnabled = false
+                            dialogView.passwordWrapper.counterMaxLength = 0
+                            dialogView.password.filters = emptyArray()
+                        }
+                        else -> {
+                            dialogView.passwordWrapper.isGone = false
+                            dialogView.passwordWrapper.isCounterEnabled = true
+                            dialogView.passwordWrapper.counterMaxLength = 63
+                            dialogView.password.filters = arrayOf(InputFilter.LengthFilter(63))
                         }
                     }
                     validate()
                 }
             }
-        }
-        if (!arg.readOnly) dialogView.password.addTextChangedListener(this@WifiApDialogFragment)
-        if (!arg.p2pMode && Build.VERSION.SDK_INT < 28) dialogView.autoShutdown.isGone = true
+        } else if (Build.VERSION.SDK_INT >= 36) dialogView.security.apply {
+            adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, 0,
+                p2pSecurityTypes).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) = error("Must select something")
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (position == WifiP2pConfig.PCC_MODE_CONNECTION_TYPE_R2_ONLY) {
+                        dialogView.passwordWrapper.isCounterEnabled = false
+                        dialogView.passwordWrapper.counterMaxLength = 0
+                        dialogView.password.filters = emptyArray()
+                    } else {
+                        dialogView.passwordWrapper.isCounterEnabled = true
+                        dialogView.passwordWrapper.counterMaxLength = 63
+                        dialogView.password.filters = arrayOf(InputFilter.LengthFilter(63))
+                    }
+                    validate()
+                }
+            }
+        } else dialogView.securityWrapper.isGone = true
+        dialogView.password.addTextChangedListener(this@WifiApDialogFragment)
         if (arg.p2pMode || Build.VERSION.SDK_INT >= 30) {
             dialogView.timeoutWrapper.helperText = getString(R.string.wifi_hotspot_timeout_default,
                     TetherTimeoutMonitor.defaultTimeout)
-            if (!arg.readOnly) dialogView.timeout.addTextChangedListener(this@WifiApDialogFragment)
+            dialogView.timeout.addTextChangedListener(this@WifiApDialogFragment)
         } else dialogView.timeoutWrapper.isGone = true
         fun Spinner.configure(options: List<ChannelOption>) {
             adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, 0, options).apply {
                 setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
             }
-            if (!arg.readOnly) onItemSelectedListener = this@WifiApDialogFragment
+            onItemSelectedListener = this@WifiApDialogFragment
         }
-        if (Build.VERSION.SDK_INT >= 23 || arg.p2pMode) {
-            dialogView.bandPrimary.configure(currentChannels)
-            if (Build.VERSION.SDK_INT >= 31 && !arg.p2pMode) {
-                dialogView.bandSecondary.configure(listOf(ChannelOption.Disabled) + currentChannels)
-            } else dialogView.bandSecondary.isGone = true
-        } else dialogView.bandGroup.isGone = true
-        if (arg.p2pMode || Build.VERSION.SDK_INT < 30) dialogView.accessControlGroup.isGone = true
-        else if (!arg.readOnly) {
+        dialogView.bandPrimary.configure(currentChannels)
+        if (Build.VERSION.SDK_INT >= 31 && !arg.p2pMode) {
+            dialogView.bandSecondary.configure(listOf(ChannelOption.Disabled) + currentChannels)
+        } else dialogView.bandSecondary.isGone = true
+        if (arg.p2pMode || Build.VERSION.SDK_INT < 30) dialogView.accessControlGroup.isGone = true else {
             dialogView.maxClient.addTextChangedListener(this@WifiApDialogFragment)
             dialogView.blockedList.addTextChangedListener(this@WifiApDialogFragment)
+            dialogView.clientUserControl.setOnCheckedChangeListener { _, checked ->
+                dialogView.allowedListWrapper.isEnabled = checked
+            }
             dialogView.allowedList.addTextChangedListener(this@WifiApDialogFragment)
         }
-        if (!arg.readOnly) dialogView.bssid.addTextChangedListener(this@WifiApDialogFragment)
+        dialogView.bssid.addTextChangedListener(this@WifiApDialogFragment)
         if (arg.p2pMode) dialogView.hiddenSsid.isGone = true
         if (arg.p2pMode && Build.VERSION.SDK_INT >= 29) dialogView.macRandomization.isEnabled = false
         else if (arg.p2pMode || Build.VERSION.SDK_INT < 31) dialogView.macRandomizationWrapper.isGone = true
@@ -266,7 +326,7 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
                 TetherTimeoutMonitor.defaultTimeoutBridged)
         }
         if (Build.VERSION.SDK_INT < 33) dialogView.vendorElementsWrapper.isGone = true
-        else if (!arg.readOnly) dialogView.vendorElements.addTextChangedListener(this@WifiApDialogFragment)
+        else dialogView.vendorElements.addTextChangedListener(this@WifiApDialogFragment)
         if (arg.p2pMode || Build.VERSION.SDK_INT < 33) {
             dialogView.ieee80211be.isGone = true
             dialogView.bridgedTimeout.isEnabled = false
@@ -278,15 +338,14 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
                 bandWidthOptions).apply {
                 setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
             }
-            if (!arg.readOnly) {
-                dialogView.bridgedTimeout.addTextChangedListener(this@WifiApDialogFragment)
-                dialogView.persistentRandomizedMac.addTextChangedListener(this@WifiApDialogFragment)
-                for ((_, text, _) in acsList) text.addTextChangedListener(this@WifiApDialogFragment)
-                dialogView.acs5g.addTextChangedListener(this@WifiApDialogFragment)
-                dialogView.acs6g.addTextChangedListener(this@WifiApDialogFragment)
-                dialogView.maxChannelBandwidth.onItemSelectedListener = this@WifiApDialogFragment
-            }
+            dialogView.bridgedTimeout.addTextChangedListener(this@WifiApDialogFragment)
+            dialogView.persistentRandomizedMac.addTextChangedListener(this@WifiApDialogFragment)
+            for ((_, text, _) in acsList) text.addTextChangedListener(this@WifiApDialogFragment)
+            dialogView.acs5g.addTextChangedListener(this@WifiApDialogFragment)
+            dialogView.acs6g.addTextChangedListener(this@WifiApDialogFragment)
+            dialogView.maxChannelBandwidth.onItemSelectedListener = this@WifiApDialogFragment
         }
+        if (arg.p2pMode || Build.VERSION.SDK_INT < 36) dialogView.clientIsolation.isGone = true
         base = arg.configuration
         populateFromConfiguration()
     }
@@ -302,16 +361,23 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         } else selection
     }
     private fun populateFromConfiguration() {
-        dialogView.ssid.setText(base.ssid)
-        if (!arg.p2pMode) dialogView.security.setSelection(base.securityType)
+        dialogView.ssid.setText(base.ssid.let { ssid ->
+            when {
+                ssid == null -> null
+                hexSsid -> ssid.hex
+                hexToggleable -> ssid.decode() ?: ssid.hex.also { hexSsid = true }
+                else -> ssid.toString()
+            }
+        })
+        if (!arg.p2pMode) dialogView.security.setSelection(base.securityType) else if (Build.VERSION.SDK_INT >= 36) {
+            dialogView.security.setSelection(base.securityType - SoftApConfiguration.SECURITY_TYPE_WPA2_PSK)
+        }
         dialogView.password.setText(base.passphrase)
         dialogView.autoShutdown.isChecked = base.isAutoShutdownEnabled
         dialogView.timeout.setText(base.shutdownTimeoutMillis.let { if (it <= 0) "" else it.toString() })
-        if (Build.VERSION.SDK_INT >= 23 || arg.p2pMode) {
-            dialogView.bandPrimary.setSelection(locate(0))
-            if (Build.VERSION.SDK_INT >= 31 && !arg.p2pMode) {
-                dialogView.bandSecondary.setSelection(if (base.channels.size() > 1) locate(1) + 1 else 0)
-            }
+        dialogView.bandPrimary.setSelection(locate(0))
+        if (Build.VERSION.SDK_INT >= 31 && !arg.p2pMode) {
+            dialogView.bandSecondary.setSelection(if (base.channels.size() > 1) locate(1) + 1 else 0)
         }
         dialogView.bssid.setText(base.bssid?.toString())
         dialogView.hiddenSsid.isChecked = base.isHiddenSsid
@@ -330,10 +396,14 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         dialogView.vendorElements.setText(VendorElements.serialize(base.vendorElements))
         dialogView.persistentRandomizedMac.setText(base.persistentRandomizedMacAddress?.toString())
         for ((band, text, _) in acsList) text.setText(RangeInput.toString(base.allowedAcsChannels[band]))
-        if (Build.VERSION.SDK_INT >= 33) bandWidthOptions.binarySearch(BandWidth(base.maxChannelBandwidth)).let {
+        if (Build.VERSION.SDK_INT < 33) return
+        bandWidthOptions.binarySearch(BandWidth(base.maxChannelBandwidth)).let {
             if (it < 0) {
                 Timber.w(Exception("Cannot locate bandwidth ${base.maxChannelBandwidth}"))
             } else dialogView.maxChannelBandwidth.setSelection(it)
+        }
+        if (Build.VERSION.SDK_INT >= 36 && !arg.p2pMode) {
+            dialogView.clientIsolation.isChecked = base.isClientIsolationEnabled
         }
     }
 
@@ -343,19 +413,28 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         validate()
     }
 
-    @TargetApi(28)
     private fun validate() {
         if (!started) return
-        val ssidLength = dialogView.ssid.text.toString().toByteArray().size
-        val ssidLengthOk = ssidLength in 1..32
-        dialogView.ssidWrapper.error = if (arg.p2pMode && RepeaterService.safeMode && ssidLength < 9) {
-            requireContext().getString(R.string.settings_service_repeater_safe_mode_warning)
-        } else if (ssidLengthOk) null else " "
-        val selectedSecurity = if (arg.p2pMode) {
-            SoftApConfiguration.SECURITY_TYPE_WPA2_PSK
-        } else dialogView.security.selectedItemPosition
+        val (ssidOk, ssidError) = 0.let {
+            val ssid = try {
+                ssid
+            } catch (e: IllegalArgumentException) {
+                return@let false to e.readableMessage
+            }
+            val ssidLength = ssid?.bytes?.size ?: 0
+            if (ssidLength in 1..32) true to if (arg.p2pMode && RepeaterService.safeMode && ssidLength < 9) {
+                requireContext().getString(R.string.settings_service_repeater_safe_mode_warning)
+            } else null else false to " "
+        }
+        dialogView.ssidWrapper.error = ssidError
         // see also: https://android.googlesource.com/platform/frameworks/base/+/92c8f59/wifi/java/android/net/wifi/SoftApConfiguration.java#688
-        val passwordValid = when (selectedSecurity) {
+        val passwordValid = when (when {
+            !arg.p2pMode -> dialogView.security.selectedItemPosition
+            Build.VERSION.SDK_INT >= 36 -> {
+                dialogView.security.selectedItemPosition + SoftApConfiguration.SECURITY_TYPE_WPA2_PSK
+            }
+            else -> SoftApConfiguration.SECURITY_TYPE_WPA2_PSK
+        }) {
             SoftApConfiguration.SECURITY_TYPE_OPEN,
             SoftApConfiguration.SECURITY_TYPE_WPA3_OWE_TRANSITION,
             SoftApConfiguration.SECURITY_TYPE_WPA3_OWE -> true
@@ -389,10 +468,8 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         dialogView.bssidWrapper.isGone = hideBssid
         dialogView.bssidWrapper.error = null
         val bssidValid = hideBssid || dialogView.bssid.length() == 0 || try {
-            val mac = MacAddressCompat.fromString(dialogView.bssid.text.toString())
-            if (Build.VERSION.SDK_INT >= 30 && !arg.p2pMode) {
-                SoftApConfigurationCompat.testPlatformValidity(mac.toPlatform())
-            }
+            val mac = MacAddress.fromString(dialogView.bssid.text.toString())
+            if (Build.VERSION.SDK_INT >= 30 && !arg.p2pMode) SoftApConfigurationCompat.testPlatformValidity(mac)
             true
         } catch (e: Exception) {
             dialogView.bssidWrapper.error = e.readableMessage
@@ -409,15 +486,15 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         dialogView.maxClientWrapper.error = maxClientError
         val listsNoError = if (Build.VERSION.SDK_INT >= 30) {
             val (blockedList, blockedListError) = try {
-                (dialogView.blockedList.text ?: "").split(nonMacChars)
-                    .filter { it.isNotEmpty() }.map { MacAddressCompat.fromString(it).toPlatform() }.toSet() to null
+                (dialogView.blockedList.text ?: "").split(nonMacChars).filter { it.isNotEmpty() }
+                    .map(MacAddress::fromString).toSet() to null
             } catch (e: IllegalArgumentException) {
                 null to e.readableMessage
             }
             dialogView.blockedListWrapper.error = blockedListError
             val allowedListError = try {
                 (dialogView.allowedList.text ?: "").split(nonMacChars).filter { it.isNotEmpty() }.forEach {
-                    val mac = MacAddressCompat.fromString(it).toPlatform()
+                    val mac = MacAddress.fromString(it)
                     require(blockedList?.contains(mac) != true) { "A MAC address exists in both client lists" }
                 }
                 null
@@ -449,9 +526,9 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         dialogView.vendorElementsWrapper.error = vendorElementsError
         dialogView.persistentRandomizedMacWrapper.error = null
         val persistentRandomizedMacValid = dialogView.persistentRandomizedMac.length() == 0 || try {
-            MacAddressCompat.fromString(dialogView.persistentRandomizedMac.text.toString())
+            MacAddress.fromString(dialogView.persistentRandomizedMac.text.toString())
             true
-        } catch (e: Exception) {
+        } catch (e: IllegalArgumentException) {
             dialogView.persistentRandomizedMacWrapper.error = e.readableMessage
             false
         }
@@ -476,12 +553,17 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
         } else null
         dialogView.maxChannelBandwidthError.isGone = bandwidthError.isNullOrEmpty()
         dialogView.maxChannelBandwidthError.text = bandwidthError
-        val canCopy = timeoutError == null && bssidValid && maxClientError == null && listsNoError &&
+        val canCopy = ssidOk && timeoutError == null && bssidValid && maxClientError == null && listsNoError &&
                 bridgedTimeoutError == null && vendorElementsError == null && persistentRandomizedMacValid &&
                 acsNoError && bandwidthError == null
-        (dialog as? AlertDialog)?.getButton(DialogInterface.BUTTON_POSITIVE)?.isEnabled =
-                ssidLengthOk && passwordValid && bandError == null && canCopy
-        dialogView.toolbar.menu.findItem(android.R.id.copy).isEnabled = canCopy
+        val canGenerate = canCopy && passwordValid && bandError == null
+        (dialog as? AlertDialog)?.getButton(DialogInterface.BUTTON_POSITIVE)?.isEnabled = canGenerate
+        dialogView.toolbar.menu.apply {
+            findItem(R.id.invalid).isVisible = canGenerate && Build.VERSION.SDK_INT >= 34 && !arg.p2pMode &&
+                    !arg.readOnly && !Services.wifi.validateSoftApConfiguration(generateConfig().toPlatform())
+            findItem(android.R.id.copy).isEnabled = canCopy
+            findItem(R.id.share_qr).isEnabled = ssidOk
+        }
     }
 
     override fun onTextChanged(s: CharSequence, start: Int, before: Int, count: Int) { }
@@ -496,9 +578,7 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
             android.R.id.copy -> try {
                 app.clipboard.setPrimaryClip(ClipData.newPlainText(null,
                         Base64.encodeToString(generateConfig().toByteArray(), BASE64_FLAGS)).apply {
-                    if (Build.VERSION.SDK_INT >= 24) {
-                        description.extras = persistableBundleOf(ClipDescription.EXTRA_IS_SENSITIVE to true)
-                    }
+                    description.extras = persistableBundleOf(ClipDescription.EXTRA_IS_SENSITIVE to true)
                 })
                 true
             } catch (e: RuntimeException) {
@@ -507,7 +587,8 @@ class WifiApDialogFragment : AlertDialogFragment<WifiApDialogFragment.Arg, WifiA
             }
             android.R.id.paste -> try {
                 app.clipboard.primaryClip?.getItemAt(0)?.text?.apply {
-                    Base64.decode(toString(), BASE64_FLAGS).toParcelable<SoftApConfigurationCompat>()?.let { config ->
+                    Base64.decode(toString(), BASE64_FLAGS).toParcelable<SoftApConfigurationCompat>(
+                        SoftApConfigurationCompat::class.java.classLoader)?.let { config ->
                         val newUnderlying = config.underlying
                         if (newUnderlying != null) {
                             arg.configuration.underlying?.let { check(it.javaClass == newUnderlying.javaClass) }

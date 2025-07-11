@@ -1,101 +1,107 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
-    id("com.android.application")
-    id("com.google.android.gms.oss-licenses-plugin")
-    id("com.google.gms.google-services")
-    id("com.google.firebase.crashlytics")
+    alias(libs.plugins.aboutLibraries)
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.crashlytics)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.google.services)
     kotlin("android")
     kotlin("kapt")
     id("kotlin-parcelize")
 }
 
+val javaVersion = 11
 android {
     namespace = "be.mygod.vpnhotspot"
 
-    val javaVersion = JavaVersion.VERSION_11
-    buildToolsVersion = "33.0.1"
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
-        sourceCompatibility = javaVersion
-        targetCompatibility = javaVersion
+        sourceCompatibility(javaVersion)
+        targetCompatibility(javaVersion)
     }
-    compileSdk = 33
-    kotlinOptions.jvmTarget = javaVersion.toString()
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+        compilerOptions.jvmTarget.set(JvmTarget.fromTarget(javaVersion.toString()))
+    }
+    compileSdk = 36
     defaultConfig {
         applicationId = "be.mygod.vpnhotspot"
-        minSdk = 21
-        targetSdk = 33
-        resourceConfigurations.addAll(arrayOf("it", "pt-rBR", "ru", "zh-rCN", "zh-rTW"))
-        versionCode = 306
-        versionName = "2.15.5"
+        minSdk = 28
+        targetSdk = 36
+        versionCode = 1035
+        versionName = "2.19.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        javaCompileOptions.annotationProcessorOptions.arguments.apply {
-            put("room.expandProjection", "true")
-            put("room.incremental", "true")
-            put("room.schemaLocation", "$projectDir/schemas")
-        }
+        androidResources.localeFilters += listOf("es", "it", "ja", "pt-rBR", "ru", "zh-rCN", "zh-rTW")
+        externalNativeBuild.cmake.arguments += listOf("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
     }
     buildFeatures {
+        buildConfig = true
         dataBinding = true
         viewBinding = true
+        compose = true
     }
     buildTypes {
-        getByName("debug") {
+        debug {
             isPseudoLocalesEnabled = true
         }
-        getByName("release") {
+        release {
             isShrinkResources = true
             isMinifyEnabled = true
+            vcsInfo.include = true
             proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")
         }
     }
-    packagingOptions.resources.excludes.add("**/*.kotlin_*")
-    flavorDimensions.add("freedom")
-    productFlavors {
-        create("freedom") {
-            dimension = "freedom"
-        }
-        create("google") {
-            dimension = "freedom"
-            versionNameSuffix = "-g"
-        }
-    }
+    packagingOptions.resources.excludes.addAll(listOf(
+        "**/*.kotlin_*",
+        "META-INF/versions/**",
+    ))
+    lint.warning += "FullBackupContent"
+    lint.warning += "UnsafeOptInUsageError"
     sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    externalNativeBuild.cmake.path = file("src/main/cpp/CMakeLists.txt")
 }
+ksp {
+    arg("room.expandProjection", "true")
+    arg("room.incremental", "true")
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+kotlin.compilerOptions.jvmTarget.set(JvmTarget.fromTarget(javaVersion.toString()))
 
 dependencies {
-    val lifecycleVersion = "2.6.1"
-    val roomVersion = "2.5.1"
-
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
-    kapt("androidx.room:room-compiler:$roomVersion")
-    implementation(kotlin("stdlib-jdk8"))
-    implementation("androidx.browser:browser:1.5.0")
-    implementation("androidx.core:core-ktx:1.10.0")
-    implementation("androidx.fragment:fragment-ktx:1.5.6")
-    implementation("androidx.lifecycle:lifecycle-livedata-ktx:$lifecycleVersion")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:$lifecycleVersion")
-    implementation("androidx.preference:preference:1.2.0")
-    implementation("androidx.room:room-ktx:$roomVersion")
-    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
-    implementation("be.mygod.librootkotlinx:librootkotlinx:1.0.2")
-    implementation("com.android.billingclient:billing-ktx:5.2.0")
-    implementation("com.github.tiann:FreeReflection:3.1.0")
-    implementation("com.google.android.gms:play-services-base:18.2.0")  // fix for GoogleApiActivity crash @ 18.1.0+
-    implementation("com.google.android.gms:play-services-oss-licenses:17.0.0")
-    implementation("com.google.android.material:material:1.8.0")
-    implementation("com.google.firebase:firebase-analytics-ktx:21.2.1")
-    implementation("com.google.firebase:firebase-crashlytics:18.3.6")
-    implementation("com.google.zxing:core:3.5.1")
-    implementation("com.jakewharton.timber:timber:5.0.1")
-    implementation("com.linkedin.dexmaker:dexmaker:2.28.3")
-    implementation("com.takisoft.preferencex:preferencex-simplemenu:1.1.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.3.5")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
-    add("googleImplementation", "com.google.android.play:core:1.10.3")
-    add("googleImplementation", "com.google.android.play:core-ktx:1.8.1")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.room:room-testing:$roomVersion")
-    androidTestImplementation("androidx.test:runner:1.5.2")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    androidTestImplementation("androidx.test.ext:junit-ktx:1.1.5")
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+    ksp(libs.room.compiler)
+    implementation(libs.aboutlibraries.compose.m3)
+    implementation(libs.activity.compose)
+    implementation(libs.browser)
+    implementation(libs.core.i18n)
+    implementation(libs.core.ktx)
+    implementation(libs.dexmaker)
+    implementation(libs.dnsjava)
+    implementation(libs.firebase.analytics)
+    implementation(libs.firebase.crashlytics)
+    implementation(libs.foundation.layout)
+    implementation(libs.fragment.ktx)
+    implementation(libs.hiddenapibypass)
+    implementation(libs.ktor.network.jvm)
+    implementation(libs.kotlinx.collections.immutable)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.librootkotlinx)
+    implementation(libs.lifecycle.livedata.ktx)
+    implementation(libs.lifecycle.runtime.ktx)
+    implementation(libs.material)
+    implementation(libs.material3.android)
+    implementation(libs.play.services.oss.licenses)
+    implementation(libs.preference)
+    implementation(libs.preferencex.simplemenu)
+    implementation(libs.room.ktx)
+    implementation(libs.swiperefreshlayout)
+    implementation(libs.taskerpluginlibrary)
+    implementation(libs.timber)
+    implementation(libs.zxing.core)
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(libs.junit.ktx)
+    androidTestImplementation(libs.room.testing)
+    androidTestImplementation(libs.test.runner)
 }

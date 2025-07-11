@@ -49,11 +49,14 @@
                 android:hint="@string/wifi_ssid"
                 app:counterEnabled="true"
                 app:counterMaxLength="32"
+                app:endIconContentDescription="@string/wifi_ssid_toggle_hex"
+                app:endIconDrawable="@drawable/toggle_hex"
                 app:errorEnabled="true">
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/ssid"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:autofillHints="newUsername,username"
                     style="@style/wifi_item_edit_content" />
             </com.google.android.material.textfield.TextInputLayout>
             <LinearLayout
@@ -94,6 +97,7 @@
                     android:inputType="textPassword"
                     android:typeface="monospace"
                     android:maxLength="63"
+                    android:autofillHints="wifiPassword,password"
                     android:imeOptions="flagForceAscii" />
             </com.google.android.material.textfield.TextInputLayout>
             <com.google.android.material.materialswitch.MaterialSwitch
@@ -295,14 +299,6 @@
                         android:inputType="number"
                         android:maxLength="10" />
                 </com.google.android.material.textfield.TextInputLayout>
-                <com.google.android.material.materialswitch.MaterialSwitch
-                    android:id="@+id/client_user_control"
-                    style="@style/wifi_item_label"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dip"
-                    android:minHeight="@dimen/touch_target_min"
-                    android:text="@string/wifi_client_user_control" />
                 <com.google.android.material.textfield.TextInputLayout
                     android:id="@+id/blocked_list_wrapper"
                     android:layout_width="match_parent"
@@ -318,12 +314,21 @@
                         android:imeOptions="flagForceAscii"
                         android:inputType="textMultiLine|textNoSuggestions" />
                 </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/client_user_control"
+                    style="@style/wifi_item_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dip"
+                    android:minHeight="@dimen/touch_target_min"
+                    android:text="@string/wifi_client_user_control" />
                 <com.google.android.material.textfield.TextInputLayout
                     android:id="@+id/allowed_list_wrapper"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dip"
                     android:hint="@string/wifi_allowed_list"
+                    android:enabled="false"
                     app:errorEnabled="true">
                     <com.google.android.material.textfield.TextInputEditText
                         android:id="@+id/allowed_list"
@@ -444,6 +449,14 @@
                         android:imeOptions="flagForceAscii"
                         android:inputType="textMultiLine|textNoSuggestions" />
                 </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/client_isolation"
+                    style="@style/wifi_item_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dip"
+                    android:minHeight="@dimen/touch_target_min"
+                    android:text="@string/wifi_client_isolation" />
                 <com.google.android.material.materialswitch.MaterialSwitch
                     android:id="@+id/user_config"
                     style="@style/wifi_item_label"
